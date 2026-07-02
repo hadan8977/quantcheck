@@ -89,6 +89,44 @@ class ValidationTests(unittest.TestCase):
 
         validate_member_picks_data(data)
 
+    def test_watchlist_layout_passes_with_card_fields_only(self):
+        data = {
+            "monthly": {"pick_date": "Updated July 1, 2026", "rows": [valid_monthly_row()]},
+            "weekly": {
+                "kind": "watchlist",
+                "pick_date": "Updated on Jun 26, 2026",
+                "rows": [
+                    {
+                        "symbol": f"W{i}",
+                        "company": "Watchlist One Inc.",
+                        "current_price": "$10.00",
+                        "sector": "Technology",
+                        "source_kind": "watchlist",
+                    }
+                    for i in range(1, 11)
+                ],
+            },
+        }
+
+        validate_member_picks_data(data)
+
+    def test_watchlist_layout_still_requires_monthly_detail_quality(self):
+        data = {
+            "monthly": {"pick_date": "Updated July 1, 2026", "rows": [valid_monthly_row()]},
+            "weekly": {
+                "kind": "watchlist",
+                "pick_date": "Updated on Jun 26, 2026",
+                "rows": [
+                    {"symbol": f"W{i}", "company": "Watchlist One Inc.", "current_price": "$10.00", "sector": "Technology"}
+                    for i in range(1, 11)
+                ],
+            },
+        }
+        data["monthly"]["rows"][0]["analyst_signal"] = ""
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete loaded rows"):
+            validate_member_picks_data(data)
+
     def test_partial_weekly_top10_capture_is_rejected(self):
         data = valid_capture()
         data["weekly"]["rows"] = [valid_weekly_row("BKR")]

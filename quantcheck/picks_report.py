@@ -67,6 +67,19 @@ def has_auth_session(page) -> bool:
         return False
 
 
+def is_watchlist_page(page) -> bool:
+    try:
+        return bool(page.evaluate(
+            """() => {
+              const text = (document.querySelector('main')?.innerText || document.body.innerText || '').replace(/\s+/g, ' ');
+              const title = document.title || '';
+              return /\/weekly-picks\b/i.test(location.pathname) || /\bWatchlist\b/i.test(title) || /\bWatchlist\b/i.test(text);
+            }"""
+        ))
+    except Exception:
+        return False
+
+
 def has_picks_content(page) -> bool:
     try:
         return bool(page.evaluate(
@@ -215,7 +228,7 @@ def rows_from_table(page, mode: str) -> List[Dict[str, Any]]:
         .filter(row => row.some(Boolean));
       const cards = [...document.querySelectorAll('main article, main [data-slot*="card"], main [class*="card"], main [class*="Card"]')]
         .map(el => clean(el.innerText || el.textContent))
-        .filter(text => text && /GT\s*Score|Rating|Sector|Held Since|Return/i.test(text));
+        .filter(text => text && (/GT\s*Score|Rating|Sector|Held Since|Return/i.test(text) || (mode === 'weekly' && /^([A-Z][A-Z0-9.]{0,5})\s+.+\s+\$[0-9]/.test(text))));
       return {matrix: tableRows.length ? tableRows : ariaRows, cards};
     }
     """
@@ -255,8 +268,8 @@ def extract_details_for_visible_expanded(page) -> Dict[str, str]:
             market_cap: get('Market Cap', ['Revenue (TTM)']),
             revenue_ttm: get('Revenue (TTM)', ['Revenue Growth (YoY)']),
             revenue_growth_yoy: get('Revenue Growth (YoY)', ['Next Earnings']),
-            next_earnings: get('Next Earnings', ['Analyst Signal']),
-            analyst_signal: get('Analyst Signal', ['Momentum']),
+            next_earnings: get('Next Earnings', ['Analyst Signal', 'Analyst Consensus']),
+            analyst_signal: get('Analyst Signal', ['Momentum']) || get('Analyst Consensus', ['Momentum']),
             momentum: get('Momentum', ['Relative Strength']),
             relative_strength: get('Relative Strength', ['Sandisk', 'Applied', 'Lumentum', 'Viavi', 'Ciena', 'FORM', 'DigitalOcean', 'Planet', 'Western', 'Corning'])
           };
@@ -305,8 +318,8 @@ def expand_and_attach_details(page, rows: List[Dict[str, Any]], mode: str) -> Li
         market_cap: get('Market Cap', ['Revenue (TTM)']),
         revenue_ttm: get('Revenue (TTM)', ['Revenue Growth (YoY)']),
         revenue_growth_yoy: get('Revenue Growth (YoY)', ['Next Earnings']),
-        next_earnings: get('Next Earnings', ['Analyst Signal']),
-        analyst_signal: get('Analyst Signal', ['Momentum']),
+        next_earnings: get('Next Earnings', ['Analyst Signal', 'Analyst Consensus']),
+        analyst_signal: get('Analyst Signal', ['Momentum']) || get('Analyst Consensus', ['Momentum']),
         momentum: get('Momentum', ['Relative Strength']),
         relative_strength: get('Relative Strength', [])
       };
@@ -362,7 +375,9 @@ def fetch():
         weekly_rows = wait_for_parsable_picks_rows(page, "weekly")
         main_text = clean_text(page.locator("main").inner_text())
         weekly_pick_date = extract_pick_date(main_text, "weekly")
-        weekly_rows = expand_and_attach_details(page, weekly_rows, "weekly")
+        weekly_kind = "watchlist" if is_watchlist_page(page) or any(row.get("source_kind") == "watchlist" for row in weekly_rows) else "weekly_picks"
+        if weekly_kind != "watchlist":
+            weekly_rows = expand_and_attach_details(page, weekly_rows, "weekly")
 
         browser.close()
 
@@ -370,7 +385,7 @@ def fetch():
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "source": BASE,
         "monthly": {"page": f"{BASE}/dashboard/quantgt-picks", "pick_date": monthly_pick_date, "rows": monthly_rows},
-        "weekly": {"page": f"{BASE}/dashboard/weekly-picks", "pick_date": weekly_pick_date, "rows": weekly_rows},
+        "weekly": {"page": page.url, "pick_date": weekly_pick_date, "kind": weekly_kind, "rows": weekly_rows},
     }
 
 

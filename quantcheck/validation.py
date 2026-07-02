@@ -11,6 +11,7 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
     if not weekly_rows:
         raise RuntimeError("logged-in weekly picks validation failed: no weekly rows captured")
     weekly_date = str(weekly.get("pick_date") or "")
+    weekly_kind = str(weekly.get("kind") or "weekly_picks")
     weekly_symbols = [str(row.get("symbol") or "") for row in weekly_rows]
     generic_detail_rows = [
         row for row in weekly_rows
@@ -22,10 +23,6 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
         raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: 05/15/26")
     if len(weekly_rows) < 8:
         raise RuntimeError(f"logged-in weekly picks validation failed: expected near-complete Weekly Top 10, captured {len(weekly_rows)} rows")
-    if len(generic_detail_rows) >= max(3, len(weekly_rows) // 2):
-        raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: generic placeholder details")
-    if len(weekly_rows) >= 5 and len(current_prices) == 1 and "$184.62" in current_prices:
-        raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: repeated fake current price")
     if not (monthly.get("rows") or []):
         raise RuntimeError("logged-in monthly picks validation failed: no monthly rows captured")
 
@@ -40,6 +37,21 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
             bad_monthly.append(f"{row.get('symbol') or row.get('company') or '?'} missing {','.join(missing)}")
     if bad_monthly:
         raise RuntimeError("logged-in monthly picks validation failed: incomplete loaded rows: " + "; ".join(bad_monthly[:5]))
+
+    if weekly_kind == "watchlist":
+        required_watchlist_fields = ["symbol", "company", "current_price", "sector"]
+        bad_watchlist = []
+        for row in weekly_rows:
+            missing = [field for field in required_watchlist_fields if row.get(field) in (None, "")]
+            if missing:
+                bad_watchlist.append(f"{row.get('symbol') or row.get('company') or '?'} missing {','.join(missing)}")
+        if bad_watchlist:
+            raise RuntimeError("logged-in watchlist validation failed: incomplete rows: " + "; ".join(bad_watchlist[:5]))
+        return
+    if len(generic_detail_rows) >= max(3, len(weekly_rows) // 2):
+        raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: generic placeholder details")
+    if len(weekly_rows) >= 5 and len(current_prices) == 1 and "$184.62" in current_prices:
+        raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: repeated fake current price")
 
     # Newer Quant GT weekly detail panels may omit buy/entry price for some
     # picks, while still rendering the rest of the authenticated detail data.

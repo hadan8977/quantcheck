@@ -118,8 +118,15 @@ def format_row_brief(row: Dict[str, Any], fields: List[str]) -> str:
     return '; '.join(parts)
 
 
+def section_title(default: str, section: Dict[str, Any]) -> str:
+    if section.get('kind') == 'watchlist':
+        return 'Weekly Watchlist'
+    return default
+
+
 def format_pick_list(title: str, section: Dict[str, Any], max_rows: int = 12) -> List[str]:
     rows = section.get('rows', []) or []
+    title = section_title(title, section)
     lines = [f"{title}: {section.get('pick_date', 'Unknown')} · {len(rows)} stocks"]
     if not rows:
         lines.append('- None captured')
@@ -194,7 +201,7 @@ def build_notification_html(data: Dict[str, Any], diff: Dict[str, Any] | None = 
             cards.append(f'<tr><td style="{TD}">No rows captured</td></tr>')
         return f'''
         <section style="margin:20px 0 0 0;">
-          <h2 style="font-size:18px;line-height:1.3;color:#0f172a;margin:0 0 6px 0;">{esc(section_name)}</h2>
+          <h2 style="font-size:18px;line-height:1.3;color:#0f172a;margin:0 0 6px 0;">{esc(section_title(section_name, section))}</h2>
           <div style="font-size:15px;color:#64748b;margin:0 0 10px 0;">Date: {esc(section.get('pick_date', 'Unknown'))} · {len(rows)} stocks</div>
           <table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:collapse;width:100%;font-size:15px;line-height:1.4;">
             <tbody>{''.join(cards)}</tbody>
@@ -354,7 +361,7 @@ def build_telegram_body(data: Dict[str, Any], diff: Dict[str, Any] | None = None
         '',
         'Summary:',
         f"- Monthly Picks: {monthly.get('pick_date', 'Unknown')} · {len(monthly.get('rows', []) or [])} stocks",
-        f"- Weekly Picks: {weekly.get('pick_date', 'Unknown')} · {len(weekly.get('rows', []) or [])} stocks",
+        f"- {section_title('Weekly Picks', weekly)}: {weekly.get('pick_date', 'Unknown')} · {len(weekly.get('rows', []) or [])} stocks",
     ]
     if diff is not None:
         summary = summarize_diff(diff, compact=True)
@@ -505,15 +512,24 @@ def _wait_for_screenshot_ready(page, name: str) -> None:
     rows = report.wait_for_parsable_picks_rows(page, name)
     if name == 'weekly' and len(rows) < 10:
         raise RuntimeError(f'weekly screenshot not ready: expected 10 parsed rows, got {len(rows)}')
-    page.wait_for_function(
-        """(mode) => {
-          const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-          if (mode === 'weekly') return height > window.innerHeight + 400;
-          return height >= window.innerHeight;
-        }""",
-        arg=name,
-        timeout=20000,
-    )
+    try:
+        page.wait_for_function(
+            """(mode) => {
+              const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+              if (mode === 'weekly') {
+                const text = (document.querySelector('main')?.innerText || document.body.innerText || '').replace(/\s+/g, ' ');
+                if (/\bWatchlist\b/i.test(text) || /\/weekly-picks\b/i.test(location.pathname)) {
+                  return height >= window.innerHeight;
+                }
+                return height > window.innerHeight + 400;
+              }
+              return height >= window.innerHeight;
+            }""",
+            arg=name,
+            timeout=20000,
+        )
+    except PlaywrightTimeoutError:
+        pass
     page.wait_for_timeout(1000)
 
 
@@ -809,6 +825,7 @@ def main():
     ap.add_argument('--mode', choices=['baseline', 'check', 'fetch', 'screenshot'], default='check')
     ap.add_argument('--force', action='store_true')
     ap.add_argument('--no-random', action='store_true')
+    ap.add_argument('--quiet', action='store_true', help='Suppress baseline status output')
     ap.add_argument('--test-email', action='store_true', help='Fetch current picks, export Excel, capture screenshots, and send a test email notification')
     ap.add_argument('--recipient', help='Send the test email to one explicit recipient instead of the default route')
     args = ap.parse_args()

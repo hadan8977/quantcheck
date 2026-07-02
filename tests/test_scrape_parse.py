@@ -74,6 +74,25 @@ class ScrapeParseTests(unittest.TestCase):
             [{"company": "Gamma Ltd", "symbol": "GAMA", "sector": "Energy", "rating": "Buy", "gt_score": "82"}],
         )
 
+    def test_rows_from_watchlist_card_layout(self):
+        cards = ["SNDK Sandisk Corporation $2,032.22 Electronic Technology"]
+
+        self.assertEqual(
+            rows_from_card_texts(cards, "weekly"),
+            [{
+                "symbol": "SNDK",
+                "company": "Sandisk Corporation",
+                "current_price": "$2,032.22",
+                "sector": "Electronic Technology",
+                "source_kind": "watchlist",
+            }],
+        )
+
+    def test_analyst_consensus_is_a_detail_label_boundary(self):
+        cards = ["Company: Gamma Ltd Symbol: GAMA Sector: Energy Analyst Consensus Buy +0.12 Momentum 1.9/2 GT Score: 82"]
+
+        self.assertEqual(rows_from_card_texts(cards, "weekly")[0]["sector"], "Energy")
+
     def test_monthly_holdings_date_is_supported(self):
         text = "Portfolio Return May Holdings 05/01/26 - now Company Symbol Held Since"
 
@@ -83,6 +102,11 @@ class ScrapeParseTests(unittest.TestCase):
         text = "Portfolio Return Latest Holdings Updated May 1, 2026 MTD +14.76% COMPANY SYMBOL"
 
         self.assertEqual(extract_pick_date(text, "monthly"), "Updated May 1, 2026")
+
+    def test_monthly_updated_on_date_is_supported(self):
+        text = "Portfolio Return Latest Holdings Updated on July 1, 2026 MTD -4.38% COMPANY SYMBOL"
+
+        self.assertEqual(extract_pick_date(text, "monthly"), "Updated on July 1, 2026")
 
     def test_week_of_date_is_supported(self):
         text = "Weekly Picks Guidance only Week of May 25, 2026 COMPANY SYMBOL SECTOR"

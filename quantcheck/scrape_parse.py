@@ -14,6 +14,7 @@ KNOWN_DETAIL_LABELS = [
     "Revenue Growth (YoY)",
     "Next Earnings",
     "Analyst Signal",
+    "Analyst Consensus",
     "Momentum",
     "Relative Strength",
 ]
@@ -49,6 +50,11 @@ HEADER_ALIASES = {
 }
 
 
+WATCHLIST_CARD_RE = re.compile(
+    r"^(?P<symbol>[A-Z][A-Z0-9.]{0,5})\s+(?P<company>.+?)\s+(?P<price>\$[0-9][0-9,.]*(?:\.\d+)?)\s+(?P<sector>[A-Za-z][A-Za-z &/.-]+)$"
+)
+
+
 def canonical_header(value: Any) -> str | None:
     return HEADER_ALIASES.get(normalize_header(value))
 
@@ -56,6 +62,9 @@ def canonical_header(value: Any) -> str | None:
 def extract_pick_date(text: str, mode: str) -> str:
     clean = clean_text(text)
     if mode == "monthly":
+        match = re.search(rf"\bUpdated\s+on\s+(?:{MONTHS})\s+\d{{1,2}},\s+\d{{4}}\b", clean, re.I)
+        if match:
+            return match.group(0)
         match = re.search(rf"\bUpdated\s+(?:{MONTHS})\s+\d{{1,2}},\s+\d{{4}}\b", clean, re.I)
         if match:
             return match.group(0)
@@ -153,6 +162,16 @@ def row_from_card_text(text: str, mode: str) -> Dict[str, Any] | None:
     clean = clean_text(text)
     if not clean:
         return None
+    if mode == "weekly":
+        watchlist_match = WATCHLIST_CARD_RE.match(clean)
+        if watchlist_match:
+            return {
+                "symbol": watchlist_match.group("symbol"),
+                "company": clean_text(watchlist_match.group("company")),
+                "current_price": watchlist_match.group("price"),
+                "sector": clean_text(watchlist_match.group("sector")),
+                "source_kind": "watchlist",
+            }
     symbol_match = re.search(r"\b[A-Z][A-Z0-9.]{0,5}\b", clean)
     score_match = re.search(r"\bGT\s*Score\b[:\s]*([0-9]+(?:\.[0-9]+)?)", clean, re.I)
     if not symbol_match or not score_match:
