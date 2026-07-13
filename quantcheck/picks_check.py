@@ -298,8 +298,8 @@ def build_notification_html(data: Dict[str, Any], diff: Dict[str, Any] | None = 
         <section style="margin:18px 0 0 0;background:#f8fafc;border:1px solid #d7e3da;border-radius:12px;padding:14px 16px;">
           <h2 style="font-size:17px;color:#0f172a;margin:0;">Changes Summary</h2>
           <div style="font-size:13px;color:#64748b;line-height:1.45;margin-top:4px;">Grouped by list, then by change type. Green chips are new values; gray chips are previous values.</div>
-          {section('monthly', 'Monthly Picks')}
-          {section('weekly', 'Weekly Picks')}
+          {section('monthly', 'Portfolio')}
+          {section('weekly', section_title('Weekly Picks', weekly))}
         </section>'''
 
     monthly = data.get('monthly', {})
@@ -316,7 +316,7 @@ def build_notification_html(data: Dict[str, Any], diff: Dict[str, Any] | None = 
         <h1 style="font-size:26px;line-height:1.2;margin:6px 0 8px 0;color:#0f172a;">Picks Report</h1>
         <div style="font-size:13px;color:#64748b;line-height:1.5;">Context: {esc(context)}<br>Fetched: {esc(fetched)}<br>Source: {esc(data.get('source', BASE))}</div>
         {change_box(diff)}
-        {table('Monthly Picks', monthly, 'monthly')}
+        {table('Portfolio', monthly, 'monthly')}
         {table('Weekly Picks', weekly, 'weekly')}
       </div>
     </div>
@@ -343,7 +343,7 @@ def build_notification_body(data: Dict[str, Any], diff: Dict[str, Any] | None = 
     lines += [
         '',
         'Current Picks:',
-        *format_pick_list('Monthly Picks', monthly),
+        *format_pick_list('Portfolio', monthly),
         '',
         *format_pick_list('Weekly Picks', weekly),
     ]
@@ -360,7 +360,7 @@ def build_telegram_body(data: Dict[str, Any], diff: Dict[str, Any] | None = None
         f'Fetched: {fetched}',
         '',
         'Summary:',
-        f"- Monthly Picks: {monthly.get('pick_date', 'Unknown')} · {len(monthly.get('rows', []) or [])} stocks",
+        f"- Portfolio: {monthly.get('pick_date', 'Unknown')} · {len(monthly.get('rows', []) or [])} stocks",
         f"- {section_title('Weekly Picks', weekly)}: {weekly.get('pick_date', 'Unknown')} · {len(weekly.get('rows', []) or [])} stocks",
     ]
     if diff is not None:
@@ -374,7 +374,7 @@ def build_telegram_body(data: Dict[str, Any], diff: Dict[str, Any] | None = None
 
 def summarize_diff(diff: Dict[str, Any], compact: bool = False) -> str:
     lines = []
-    for section, title in [('monthly', 'Monthly Picks'), ('weekly', 'Weekly Picks')]:
+    for section, title in [('monthly', 'Portfolio'), ('weekly', 'Weekly Watchlist')]:
         d = diff.get(section, {})
         if not d.get('changed_flag'):
             continue
@@ -572,7 +572,8 @@ def capture_logged_in_screenshots(which: List[str], expected_data: Dict[str, Any
             expected_rows = ((expected_data or {}).get(name, {}) or {}).get('rows') or []
             if expected_rows:
                 _assert_screenshot_symbols_match(page, name, expected_rows)
-            path = SHOTS / f'{name}_picks_{ts}.png'
+            attachment_name = 'portfolio' if name == 'monthly' else 'watchlist'
+            path = SHOTS / f'{attachment_name}_{ts}.png'
             page.screenshot(path=str(path), full_page=True)
             out[name] = path
         context.close()
@@ -780,12 +781,9 @@ def run_check(force=False, no_random=False):
         json_dump(ROOT / 'latest_picks.json', data)
         excel = report.export_excel(data)
         prune_old_files(OUTPUT, 'quantgt_picks_report_*.xlsx', keep=80)
-        changed_pages = []
-        if diff['monthly'].get('changed_flag'):
-            changed_pages.append('monthly')
-        if diff['weekly'].get('changed_flag'):
-            changed_pages.append('weekly')
-        shots = capture_logged_in_screenshots(changed_pages, expected_data=data)
+        shots = capture_logged_in_screenshots(['monthly', 'weekly'], expected_data=data)
+        prune_old_files(SHOTS, 'portfolio_*.png', keep=80)
+        prune_old_files(SHOTS, 'watchlist_*.png', keep=80)
         prune_old_files(SHOTS, '*_picks_*.png', keep=160)
         tg_body = build_telegram_body(data, diff, context=f'picks changed · window={window or "forced"}')
         body = build_notification_body(data, diff, context=f'picks changed · window={window or "forced"}')
@@ -799,7 +797,7 @@ def run_check(force=False, no_random=False):
         failures = int(health.get('consecutive_failures') or 0) + 1
         failure_shot = None
         try:
-            shots = capture_logged_in_screenshots(['weekly'])
+            shots = capture_logged_in_screenshots(['monthly', 'weekly'])
             failure_shot = shots.get('weekly')
         except Exception:
             pass

@@ -212,6 +212,47 @@ def rows_from_card_texts(texts: Iterable[str], mode: str) -> List[Dict[str, Any]
     return out
 
 
+def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
+    clean = clean_text(text)
+    labels = ["P/E (TTM)", "Market Cap", "Revenue (TTM)", "Revenue Growth (YoY)", "Next Earnings", "Analyst Signal", "Analyst Consensus", "Momentum", "Relative Strength", "More Headlines", "Close"]
+
+    def value_after(label: str, next_labels: Iterable[str]) -> str:
+        match = re.search(re.escape(label) + r"\s*:?\s*", clean, re.I)
+        if not match:
+            return ""
+        end = len(clean)
+        for next_label in next_labels:
+            next_match = re.search(re.escape(next_label) + r"\s*:?\s*", clean[match.end():], re.I)
+            if next_match:
+                end = min(end, match.end() + next_match.start())
+        return clean_text(clean[match.end():end])
+
+    entry = re.search(rf"\b{re.escape(symbol)}\s*:\s*(\$[0-9.,]+)", clean, re.I)
+    momentum = value_after("Momentum", ["Relative Strength"])
+    relative_strength = value_after("Relative Strength", ["More Headlines", "Close"])
+    momentum_match = re.search(r"([0-9.]+)\s*/\s*2", momentum)
+    strength_match = re.search(r"([0-9.]+)\s*/\s*3", relative_strength)
+    if momentum_match:
+        momentum = f"{momentum_match.group(1)}/2"
+    if strength_match:
+        relative_strength = f"{strength_match.group(1)}/3"
+    details = {
+        "buy_or_entry_price": entry.group(1) if entry else "",
+        "pe_ttm": value_after("P/E (TTM)", labels[1:]),
+        "market_cap": value_after("Market Cap", labels[2:]),
+        "revenue_ttm": value_after("Revenue (TTM)", labels[3:]),
+        "revenue_growth_yoy": value_after("Revenue Growth (YoY)", labels[4:]),
+        "next_earnings": value_after("Next Earnings", labels[5:]),
+        "analyst_signal": value_after("Analyst Signal", labels[6:]) or value_after("Analyst Consensus", labels[7:]),
+        "momentum": momentum,
+        "relative_strength": relative_strength,
+    }
+    if momentum_match and strength_match:
+        score = float(momentum_match.group(1)) + float(strength_match.group(1))
+        details["gt_score"] = f"{score:.2f}/5"
+    return details
+
+
 def _value_after_label(text: str, label: str) -> str:
     labels = ["Company", "Symbol", "Held Since", "Return", "Sector", "Rating", "GT Score", *KNOWN_DETAIL_LABELS]
     pattern = re.compile(rf"\b{re.escape(label)}\b\s*:?\s*", re.I)

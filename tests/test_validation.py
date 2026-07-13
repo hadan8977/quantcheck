@@ -89,7 +89,7 @@ class ValidationTests(unittest.TestCase):
 
         validate_member_picks_data(data)
 
-    def test_watchlist_layout_passes_with_card_fields_only(self):
+    def test_watchlist_layout_rejects_card_fields_without_dialog_details(self):
         data = {
             "monthly": {"pick_date": "Updated July 1, 2026", "rows": [valid_monthly_row()]},
             "weekly": {
@@ -107,6 +107,15 @@ class ValidationTests(unittest.TestCase):
                 ],
             },
         }
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete detail rows"):
+            validate_member_picks_data(data)
+
+    def test_watchlist_layout_passes_with_dialog_details(self):
+        data = valid_capture()
+        data["weekly"]["kind"] = "watchlist"
+        for row in data["weekly"]["rows"]:
+            row.update({"momentum": "1.20/2", "relative_strength": "3.00/3"})
 
         validate_member_picks_data(data)
 

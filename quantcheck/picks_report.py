@@ -20,7 +20,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from quantcheck.scrape_parse import clean_text, extract_pick_date, rows_from_card_texts, rows_from_matrix
+from quantcheck.scrape_parse import clean_text, extract_pick_date, parse_watchlist_dialog_text, rows_from_card_texts, rows_from_matrix
 
 BASE = "https://quantgt.io"
 ROOT = Path(os.environ.get("QUANTCHECK_HOME", Path(__file__).resolve().parents[1]))
@@ -343,6 +343,38 @@ def expand_and_attach_details(page, rows: List[Dict[str, Any]], mode: str) -> Li
     return rows
 
 
+def expand_watchlist_and_attach_details(page, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for row in rows:
+        symbol = row.get("symbol")
+        if not symbol:
+            continue
+        last_error = "dialog did not open"
+        for _ in range(2):
+            try:
+                page.get_by_text(symbol, exact=True).first.click()
+                dialog = page.locator('[role="dialog"]')
+                dialog.wait_for(state="visible", timeout=8000)
+                text = clean_text(dialog.inner_text(timeout=5000))
+                if not re.match(rf"^{re.escape(symbol)}\b", text):
+                    raise RuntimeError(f"dialog symbol mismatch for {symbol}")
+                details = parse_watchlist_dialog_text(text, symbol)
+                row.update({k: clean_text(v) for k, v in details.items()})
+                page.get_by_role("button", name="Close").last.click()
+                dialog.wait_for(state="hidden", timeout=5000)
+                last_error = ""
+                break
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    page.keyboard.press("Escape")
+                    page.locator('[role="dialog"]').wait_for(state="hidden", timeout=3000)
+                except Exception:
+                    pass
+        if last_error:
+            row["detail_error"] = last_error
+    return rows
+
+
 def fetch():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -376,7 +408,9 @@ def fetch():
         main_text = clean_text(page.locator("main").inner_text())
         weekly_pick_date = extract_pick_date(main_text, "weekly")
         weekly_kind = "watchlist" if is_watchlist_page(page) or any(row.get("source_kind") == "watchlist" for row in weekly_rows) else "weekly_picks"
-        if weekly_kind != "watchlist":
+        if weekly_kind == "watchlist":
+            weekly_rows = expand_watchlist_and_attach_details(page, weekly_rows)
+        else:
             weekly_rows = expand_and_attach_details(page, weekly_rows, "weekly")
 
         browser.close()
@@ -467,8 +501,9 @@ def write_summary(wb, data):
     # Overview should only show the actual monthly/weekly pick lists, with update dates beside titles.
     ws.merge_cells("A6:C6")
     ws.merge_cells("E6:G6")
-    ws.cell(6, 1, f"Monthly Picks · {data['monthly']['pick_date']}")
-    ws.cell(6, 5, f"Weekly Picks · {data['weekly']['pick_date']}")
+    ws.cell(6, 1, f"Portfolio · {data['monthly']['pick_date']}")
+    weekly_title = "Weekly Watchlist" if data["weekly"].get("kind") == "watchlist" else "Weekly Picks"
+    ws.cell(6, 5, f"{weekly_title} · {data['weekly']['pick_date']}")
     for c in [1, 5]:
         ws.cell(6, c).fill = PatternFill("solid", fgColor=GREEN_SOFT)
         ws.cell(6, c).font = Font(name="Aptos", bold=True, color=GREEN_DARK)
@@ -567,8 +602,9 @@ def write_picks_sheet(wb, sheet_name, title, pick_date, rows, mode):
 def export_excel(data) -> Path:
     wb = Workbook()
     write_summary(wb, data)
-    write_picks_sheet(wb, "Monthly Picks", "Monthly Picks", data["monthly"]["pick_date"], data["monthly"]["rows"], "monthly")
-    write_picks_sheet(wb, "Weekly Picks", "Weekly Picks", data["weekly"]["pick_date"], data["weekly"]["rows"], "weekly")
+    write_picks_sheet(wb, "Portfolio", "Portfolio", data["monthly"]["pick_date"], data["monthly"]["rows"], "monthly")
+    weekly_title = "Weekly Watchlist" if data["weekly"].get("kind") == "watchlist" else "Weekly Picks"
+    write_picks_sheet(wb, weekly_title, weekly_title, data["weekly"]["pick_date"], data["weekly"]["rows"], "weekly")
 
     path = OUT_DIR / f"quantgt_picks_report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
     wb.save(path)

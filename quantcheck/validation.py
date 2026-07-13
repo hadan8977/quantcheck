@@ -39,14 +39,17 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
         raise RuntimeError("logged-in monthly picks validation failed: incomplete loaded rows: " + "; ".join(bad_monthly[:5]))
 
     if weekly_kind == "watchlist":
-        required_watchlist_fields = ["symbol", "company", "current_price", "sector"]
+        required_watchlist_fields = [
+            "symbol", "company", "current_price", "sector", "gt_score",
+            "next_earnings", "analyst_signal", "momentum", "relative_strength",
+        ]
         bad_watchlist = []
         for row in weekly_rows:
             missing = [field for field in required_watchlist_fields if row.get(field) in (None, "")]
             if missing:
                 bad_watchlist.append(f"{row.get('symbol') or row.get('company') or '?'} missing {','.join(missing)}")
         if bad_watchlist:
-            raise RuntimeError("logged-in watchlist validation failed: incomplete rows: " + "; ".join(bad_watchlist[:5]))
+            raise RuntimeError("logged-in watchlist validation failed: incomplete detail rows: " + "; ".join(bad_watchlist[:5]))
         return
     if len(generic_detail_rows) >= max(3, len(weekly_rows) // 2):
         raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: generic placeholder details")

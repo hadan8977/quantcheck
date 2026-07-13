@@ -1,6 +1,11 @@
 import unittest
 
-from quantcheck.scrape_parse import extract_pick_date, rows_from_card_texts, rows_from_matrix
+from quantcheck.scrape_parse import (
+    extract_pick_date,
+    parse_watchlist_dialog_text,
+    rows_from_card_texts,
+    rows_from_matrix,
+)
 
 
 class ScrapeParseTests(unittest.TestCase):
@@ -87,6 +92,26 @@ class ScrapeParseTests(unittest.TestCase):
                 "source_kind": "watchlist",
             }],
         )
+
+    def test_watchlist_dialog_details_restore_legacy_weekly_fields(self):
+        text = (
+            "SNDK Electronic Technology Sandisk Corporation PRICE $1,915.92 "
+            "$1915.92 +596.09% 1M 6M 1Y YTD SNDK : $618.82 "
+            "P/E (TTM) 66.60 Market Cap $283.21B Revenue (TTM) $13.18B "
+            "Revenue Growth (YoY) +82.76% Next Earnings Aug 13, 2026 "
+            "Analyst Consensus Buy +0.24 Momentum 1.96/2 Relative Strength 3.00/3 "
+            "Sandisk Corporation develops data storage products. More Headlines"
+        )
+
+        details = parse_watchlist_dialog_text(text, "SNDK")
+
+        self.assertEqual(details["buy_or_entry_price"], "$618.82")
+        self.assertEqual(details["market_cap"], "$283.21B")
+        self.assertEqual(details["next_earnings"], "Aug 13, 2026")
+        self.assertEqual(details["analyst_signal"], "Buy +0.24")
+        self.assertEqual(details["momentum"], "1.96/2")
+        self.assertEqual(details["relative_strength"], "3.00/3")
+        self.assertEqual(details["gt_score"], "4.96/5")
 
     def test_analyst_consensus_is_a_detail_label_boundary(self):
         cards = ["Company: Gamma Ltd Symbol: GAMA Sector: Energy Analyst Consensus Buy +0.12 Momentum 1.9/2 GT Score: 82"]
