@@ -1,6 +1,21 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
+
+
+ANALYST_SIGNAL_RE = re.compile(
+    r"^(?:Strong Buy|Strong Sell|Buy|Sell|Neutral|Hold) [+-]?\d+(?:\.\d+)?$"
+)
+
+
+def invalid_analyst_signal_rows(rows):
+    return [
+        str(row.get("symbol") or row.get("company") or "?")
+        for row in rows
+        if row.get("analyst_signal")
+        and not ANALYST_SIGNAL_RE.fullmatch(str(row.get("analyst_signal")).strip())
+    ]
 
 
 def validate_member_picks_data(data: Dict[str, Any]) -> None:
@@ -37,19 +52,33 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
             bad_monthly.append(f"{row.get('symbol') or row.get('company') or '?'} missing {','.join(missing)}")
     if bad_monthly:
         raise RuntimeError("logged-in monthly picks validation failed: incomplete loaded rows: " + "; ".join(bad_monthly[:5]))
+    malformed_monthly_signals = invalid_analyst_signal_rows(monthly_rows)
+    if malformed_monthly_signals:
+        raise RuntimeError(
+            "logged-in monthly picks validation failed: malformed analyst signal for: "
+            + ", ".join(malformed_monthly_signals[:5])
+        )
 
     if weekly_kind == "watchlist":
         required_watchlist_fields = [
             "symbol", "company", "current_price", "sector", "gt_score",
-            "next_earnings", "analyst_signal", "momentum", "relative_strength",
+            "next_earnings", "analyst_signal",
         ]
         bad_watchlist = []
         for row in weekly_rows:
             missing = [field for field in required_watchlist_fields if row.get(field) in (None, "")]
+            if row.get("gt_score_source") not in {"weekly_api_score", "dialog_components"}:
+                missing.append("gt_score_source")
             if missing:
                 bad_watchlist.append(f"{row.get('symbol') or row.get('company') or '?'} missing {','.join(missing)}")
         if bad_watchlist:
             raise RuntimeError("logged-in watchlist validation failed: incomplete detail rows: " + "; ".join(bad_watchlist[:5]))
+        malformed_watchlist_signals = invalid_analyst_signal_rows(weekly_rows)
+        if malformed_watchlist_signals:
+            raise RuntimeError(
+                "logged-in watchlist validation failed: malformed analyst signal for: "
+                + ", ".join(malformed_watchlist_signals[:5])
+            )
         return
     if len(generic_detail_rows) >= max(3, len(weekly_rows) // 2):
         raise RuntimeError("rejected unauthenticated/demo Weekly Picks signature: generic placeholder details")
@@ -75,3 +104,9 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
             if missing:
                 bad_weekly.append(f"{row.get('symbol') or row.get('company') or '?'} missing {','.join(missing)}")
         raise RuntimeError("logged-in weekly picks validation failed: incomplete detail rows: " + "; ".join(bad_weekly[:5]))
+    malformed_weekly_signals = invalid_analyst_signal_rows(weekly_rows)
+    if malformed_weekly_signals:
+        raise RuntimeError(
+            "logged-in weekly picks validation failed: malformed analyst signal for: "
+            + ", ".join(malformed_weekly_signals[:5])
+        )

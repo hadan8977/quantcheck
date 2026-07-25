@@ -72,6 +72,15 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "incomplete loaded rows"):
             validate_member_picks_data(data)
 
+    def test_monthly_analyst_signal_with_description_is_rejected(self):
+        data = valid_capture()
+        data["monthly"]["rows"][0]["analyst_signal"] = (
+            "Sell -0.29 Sandisk Corporation develops data storage devices. More Headlines"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "malformed analyst signal"):
+            validate_member_picks_data(data)
+
     def test_weekly_detail_without_buy_price_passes_when_other_details_loaded(self):
         data = valid_capture()
         data["weekly"]["rows"][0]["buy_or_entry_price"] = ""
@@ -115,7 +124,19 @@ class ValidationTests(unittest.TestCase):
         data = valid_capture()
         data["weekly"]["kind"] = "watchlist"
         for row in data["weekly"]["rows"]:
-            row.update({"momentum": "1.20/2", "relative_strength": "3.00/3"})
+            row.update({
+                "momentum": "1.20/2",
+                "relative_strength": "3.00/3",
+                "gt_score_source": "dialog_components",
+            })
+
+        validate_member_picks_data(data)
+
+    def test_watchlist_api_score_passes_without_retired_component_fields(self):
+        data = valid_capture()
+        data["weekly"]["kind"] = "watchlist"
+        for row in data["weekly"]["rows"]:
+            row["gt_score_source"] = "weekly_api_score"
 
         validate_member_picks_data(data)
 

@@ -1,7 +1,9 @@
 import unittest
 
+from quantcheck.picks_report import merge_watchlist_api_scores
 from quantcheck.scrape_parse import (
     extract_pick_date,
+    parse_analyst_signal_text,
     parse_watchlist_dialog_text,
     rows_from_card_texts,
     rows_from_matrix,
@@ -9,6 +11,17 @@ from quantcheck.scrape_parse import (
 
 
 class ScrapeParseTests(unittest.TestCase):
+    def test_analyst_signal_strips_company_description_and_headlines(self):
+        raw = (
+            "Sell -0.29 Sandisk Corporation develops data storage devices. "
+            "More Headlines Stock Market Today"
+        )
+
+        self.assertEqual(parse_analyst_signal_text(raw), "Sell -0.29")
+
+    def test_analyst_signal_rejects_text_without_numeric_source_value(self):
+        self.assertEqual(parse_analyst_signal_text("Sell Sandisk Corporation develops products"), "")
+
     def test_rows_from_new_monthly_table_header(self):
         matrix = [
             ["Company", "Symbol", "Held Since", "Price", "Return", "Sector", "Rating", "GT Score"],
@@ -112,6 +125,34 @@ class ScrapeParseTests(unittest.TestCase):
         self.assertEqual(details["momentum"], "1.96/2")
         self.assertEqual(details["relative_strength"], "3.00/3")
         self.assertEqual(details["gt_score"], "4.96/5")
+
+    def test_watchlist_dialog_current_layout_extracts_consensus_without_retired_scores(self):
+        text = (
+            "SNDK Electronic Technology Sandisk Corporation PRICE $1,505.00 "
+            "SNDK : $702.49 P/E (TTM) 55.98 Market Cap $237.91B "
+            "Revenue (TTM) $13.18B Revenue Growth (YoY) +82.76% "
+            "Next Earnings Aug 5, 2026 Analyst Consensus Neutral -0.09 "
+            "Sandisk Corporation develops data storage products. More Headlines Close"
+        )
+
+        details = parse_watchlist_dialog_text(text, "SNDK")
+
+        self.assertEqual(details["next_earnings"], "Aug 5, 2026")
+        self.assertEqual(details["analyst_signal"], "Neutral -0.09")
+        self.assertNotIn("gt_score", details)
+
+    def test_merge_watchlist_api_scores_uses_native_score(self):
+        rows = [{"symbol": "SNDK"}, {"symbol": "MXL"}]
+        api_rows = [
+            {"ticker": "SNDK", "score": 4.8592},
+            {"ticker": "MXL", "score": 4.8452},
+        ]
+
+        merged = merge_watchlist_api_scores(rows, api_rows)
+
+        self.assertEqual(merged[0]["gt_score"], "4.86/5")
+        self.assertEqual(merged[0]["gt_score_source"], "weekly_api_score")
+        self.assertEqual(merged[1]["gt_score"], "4.85/5")
 
     def test_analyst_consensus_is_a_detail_label_boundary(self):
         cards = ["Company: Gamma Ltd Symbol: GAMA Sector: Energy Analyst Consensus Buy +0.12 Momentum 1.9/2 GT Score: 82"]

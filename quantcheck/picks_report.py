@@ -20,7 +20,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from quantcheck.scrape_parse import clean_text, extract_pick_date, parse_watchlist_dialog_text, rows_from_card_texts, rows_from_matrix
+from quantcheck.scrape_parse import clean_text, extract_pick_date, parse_analyst_signal_text, parse_watchlist_dialog_text, rows_from_card_texts, rows_from_matrix
 
 BASE = "https://quantgt.io"
 ROOT = Path(os.environ.get("QUANTCHECK_HOME", Path(__file__).resolve().parents[1]))
@@ -111,6 +111,15 @@ def has_subscription_gate(page) -> bool:
         ))
     except Exception:
         return False
+
+
+def is_watchlist_dialog_paywalled(text: str) -> bool:
+    normalized = clean_text(text).lower()
+    return (
+        "subscriber-only pick" in normalized
+        or "subscribe to unlock the full watchlist" in normalized
+        or "subscribe to unlock" in normalized
+    )
 
 
 def wait_for_picks_content(page, timeout: int = 20000) -> None:
@@ -338,8 +347,55 @@ def expand_and_attach_details(page, rows: List[Dict[str, Any]], mode: str) -> Li
             details = page.evaluate(detail_js, sym)
             if details:
                 r.update({k: clean_text(v) for k, v in details.items()})
+                r["analyst_signal"] = parse_analyst_signal_text(r.get("analyst_signal"))
         except Exception as e:
             r["detail_error"] = f"detail not captured: {type(e).__name__}"
+    return rows
+
+
+def format_watchlist_score(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}/5"
+    except (TypeError, ValueError):
+        return ""
+
+
+def merge_watchlist_api_scores(rows: List[Dict[str, Any]], api_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach the authenticated Watchlist API's native score to matching cards."""
+    api_by_symbol = {
+        clean_text(item.get("ticker")).upper(): item
+        for item in api_rows
+        if clean_text(item.get("ticker"))
+    }
+    missing = []
+    for row in rows:
+        symbol = clean_text(row.get("symbol")).upper()
+        item = api_by_symbol.get(symbol)
+        score = format_watchlist_score(item.get("score")) if item else ""
+        if not score:
+            missing.append(symbol or "?")
+            continue
+        row["gt_score"] = score
+        row["gt_score_source"] = "weekly_api_score"
+    if missing:
+        raise RuntimeError("watchlist API response missing valid GT Score for: " + ", ".join(missing[:5]))
+    return rows
+
+
+def fetch_watchlist_api_rows(page) -> List[Dict[str, Any]]:
+    """Read the member-only Watchlist payload used by the rendered page itself."""
+    payload = page.evaluate(
+        """async () => {
+          const response = await fetch('/api/proxy/api/weekly/stocks', { credentials: 'same-origin' });
+          let body = null;
+          try { body = await response.json(); } catch (_) {}
+          return { status: response.status, body };
+        }"""
+    )
+    status = int((payload or {}).get("status") or 0)
+    rows = (payload or {}).get("body")
+    if status != 200 or not isinstance(rows, list) or not rows:
+        raise RuntimeError(f"watchlist API did not return member rows: status={status}")
     return rows
 
 
@@ -349,12 +405,18 @@ def expand_watchlist_and_attach_details(page, rows: List[Dict[str, Any]]) -> Lis
         if not symbol:
             continue
         last_error = "dialog did not open"
+        paywall_detected = False
         for _ in range(2):
             try:
                 page.get_by_text(symbol, exact=True).first.click()
                 dialog = page.locator('[role="dialog"]')
                 dialog.wait_for(state="visible", timeout=8000)
                 text = clean_text(dialog.inner_text(timeout=5000))
+                if is_watchlist_dialog_paywalled(text):
+                    paywall_detected = True
+                    raise RuntimeError(
+                        "watchlist detail is paywalled: current session lacks Watchlist subscription access"
+                    )
                 if not re.match(rf"^{re.escape(symbol)}\b", text):
                     raise RuntimeError(f"dialog symbol mismatch for {symbol}")
                 details = parse_watchlist_dialog_text(text, symbol)
@@ -370,6 +432,10 @@ def expand_watchlist_and_attach_details(page, rows: List[Dict[str, Any]]) -> Lis
                     page.locator('[role="dialog"]').wait_for(state="hidden", timeout=3000)
                 except Exception:
                     pass
+        if paywall_detected:
+            raise RuntimeError(
+                "watchlist detail is paywalled: current session lacks Watchlist subscription access"
+            )
         if last_error:
             row["detail_error"] = last_error
     return rows
@@ -409,6 +475,7 @@ def fetch():
         weekly_pick_date = extract_pick_date(main_text, "weekly")
         weekly_kind = "watchlist" if is_watchlist_page(page) or any(row.get("source_kind") == "watchlist" for row in weekly_rows) else "weekly_picks"
         if weekly_kind == "watchlist":
+            weekly_rows = merge_watchlist_api_scores(weekly_rows, fetch_watchlist_api_rows(page))
             weekly_rows = expand_watchlist_and_attach_details(page, weekly_rows)
         else:
             weekly_rows = expand_and_attach_details(page, weekly_rows, "weekly")

@@ -24,6 +24,21 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
+ANALYST_SIGNAL_RE = re.compile(
+    r"\b(Strong\s+Buy|Strong\s+Sell|Buy|Sell|Neutral|Hold)\s+([+-]?\d+(?:\.\d+)?)\b",
+    re.I,
+)
+
+
+def parse_analyst_signal_text(value: Any) -> str:
+    """Return only the source's rating label and numeric signal value."""
+    match = ANALYST_SIGNAL_RE.search(clean_text(value))
+    if not match:
+        return ""
+    label = " ".join(part.capitalize() for part in match.group(1).split())
+    return f"{label} {match.group(2)}"
+
+
 def normalize_header(value: Any) -> str:
     text = clean_text(value).lower()
     return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
@@ -230,6 +245,10 @@ def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
     entry = re.search(rf"\b{re.escape(symbol)}\s*:\s*(\$[0-9.,]+)", clean, re.I)
     momentum = value_after("Momentum", ["Relative Strength"])
     relative_strength = value_after("Relative Strength", ["More Headlines", "Close"])
+    analyst_signal = parse_analyst_signal_text(
+        value_after("Analyst Signal", labels[6:])
+        or value_after("Analyst Consensus", labels[7:])
+    )
     momentum_match = re.search(r"([0-9.]+)\s*/\s*2", momentum)
     strength_match = re.search(r"([0-9.]+)\s*/\s*3", relative_strength)
     if momentum_match:
@@ -243,7 +262,7 @@ def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
         "revenue_ttm": value_after("Revenue (TTM)", labels[3:]),
         "revenue_growth_yoy": value_after("Revenue Growth (YoY)", labels[4:]),
         "next_earnings": value_after("Next Earnings", labels[5:]),
-        "analyst_signal": value_after("Analyst Signal", labels[6:]) or value_after("Analyst Consensus", labels[7:]),
+        "analyst_signal": analyst_signal,
         "momentum": momentum,
         "relative_strength": relative_strength,
     }
