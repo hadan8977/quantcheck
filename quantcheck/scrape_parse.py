@@ -229,7 +229,7 @@ def rows_from_card_texts(texts: Iterable[str], mode: str) -> List[Dict[str, Any]
 
 def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
     clean = clean_text(text)
-    labels = ["P/E (TTM)", "Market Cap", "Revenue (TTM)", "Revenue Growth (YoY)", "Next Earnings", "Analyst Signal", "Analyst Consensus", "Momentum", "Relative Strength", "More Headlines", "Close"]
+    labels = ["P/E (TTM)", "Market Cap", "Revenue (TTM)", "Revenue Growth (YoY)", "Next Earnings", "Analyst Signal", "Analyst Consensus", "Momentum", "Relative Strength", "Headlines", "More Headlines", "Close"]
 
     def value_after(label: str, next_labels: Iterable[str]) -> str:
         match = re.search(re.escape(label) + r"\s*:?\s*", clean, re.I)
@@ -244,11 +244,16 @@ def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
 
     entry = re.search(rf"\b{re.escape(symbol)}\s*:\s*(\$[0-9.,]+)", clean, re.I)
     momentum = value_after("Momentum", ["Relative Strength"])
-    relative_strength = value_after("Relative Strength", ["More Headlines", "Close"])
-    analyst_signal = parse_analyst_signal_text(
+    relative_strength = value_after("Relative Strength", ["Headlines", "More Headlines", "Close"])
+    next_earnings_raw = value_after("Next Earnings", labels[5:])
+    analyst_signal_raw = (
         value_after("Analyst Signal", labels[6:])
         or value_after("Analyst Consensus", labels[7:])
     )
+    unavailable_values = {"—", "–", "-", "N/A", "NA"}
+    next_earnings_unavailable = next_earnings_raw.upper() in unavailable_values
+    analyst_signal_unavailable = analyst_signal_raw.upper() in unavailable_values
+    analyst_signal = parse_analyst_signal_text(analyst_signal_raw)
     momentum_match = re.search(r"([0-9.]+)\s*/\s*2", momentum)
     strength_match = re.search(r"([0-9.]+)\s*/\s*3", relative_strength)
     if momentum_match:
@@ -261,8 +266,10 @@ def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
         "market_cap": value_after("Market Cap", labels[2:]),
         "revenue_ttm": value_after("Revenue (TTM)", labels[3:]),
         "revenue_growth_yoy": value_after("Revenue Growth (YoY)", labels[4:]),
-        "next_earnings": value_after("Next Earnings", labels[5:]),
+        "next_earnings": "" if next_earnings_unavailable else next_earnings_raw,
+        "next_earnings_unavailable": next_earnings_unavailable,
         "analyst_signal": analyst_signal,
+        "analyst_signal_unavailable": analyst_signal_unavailable,
         "momentum": momentum,
         "relative_strength": relative_strength,
     }

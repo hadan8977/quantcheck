@@ -62,11 +62,18 @@ def validate_member_picks_data(data: Dict[str, Any]) -> None:
     if weekly_kind == "watchlist":
         required_watchlist_fields = [
             "symbol", "company", "current_price", "sector", "gt_score",
-            "next_earnings", "analyst_signal",
         ]
+        optional_source_fields = {
+            "next_earnings": "next_earnings_unavailable",
+            "analyst_signal": "analyst_signal_unavailable",
+        }
         bad_watchlist = []
         for row in weekly_rows:
             missing = [field for field in required_watchlist_fields if row.get(field) in (None, "")]
+            missing.extend(
+                field for field, unavailable_flag in optional_source_fields.items()
+                if row.get(field) in (None, "") and row.get(unavailable_flag) is not True
+            )
             if row.get("gt_score_source") not in {"weekly_api_score", "dialog_components"}:
                 missing.append("gt_score_source")
             if missing:

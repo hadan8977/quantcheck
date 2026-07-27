@@ -1,5 +1,6 @@
 import unittest
 
+from quantcheck.picks_report import clean_detail_values
 from quantcheck.validation import validate_member_picks_data
 
 
@@ -139,6 +140,30 @@ class ValidationTests(unittest.TestCase):
             row["gt_score_source"] = "weekly_api_score"
 
         validate_member_picks_data(data)
+
+    def test_watchlist_accepts_explicitly_unavailable_source_details(self):
+        data = valid_capture()
+        data["weekly"]["kind"] = "watchlist"
+        for row in data["weekly"]["rows"]:
+            row["gt_score_source"] = "weekly_api_score"
+        row = data["weekly"]["rows"][0]
+        row["next_earnings"] = ""
+        row["next_earnings_unavailable"] = True
+        row["analyst_signal"] = ""
+        row["analyst_signal_unavailable"] = True
+
+        validate_member_picks_data(data)
+
+    def test_watchlist_detail_cleaning_preserves_unavailable_marker_types(self):
+        cleaned = clean_detail_values({
+            "next_earnings": "  —  ",
+            "next_earnings_unavailable": True,
+            "analyst_signal_unavailable": False,
+        })
+
+        self.assertEqual(cleaned["next_earnings"], "—")
+        self.assertIs(cleaned["next_earnings_unavailable"], True)
+        self.assertIs(cleaned["analyst_signal_unavailable"], False)
 
     def test_watchlist_layout_still_requires_monthly_detail_quality(self):
         data = {

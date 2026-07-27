@@ -49,6 +49,13 @@ RED = "DC2626"
 AMBER = "D97706"
 
 
+def clean_detail_values(details: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value if isinstance(value, bool) else clean_text(value)
+        for key, value in details.items()
+    }
+
+
 def is_login_prompt_visible(page) -> bool:
     """Return true only for real auth prompts, not marketing copy mentioning sign in."""
     try:
@@ -346,7 +353,7 @@ def expand_and_attach_details(page, rows: List[Dict[str, Any]], mode: str) -> Li
         try:
             details = page.evaluate(detail_js, sym)
             if details:
-                r.update({k: clean_text(v) for k, v in details.items()})
+                r.update(clean_detail_values(details))
                 r["analyst_signal"] = parse_analyst_signal_text(r.get("analyst_signal"))
         except Exception as e:
             r["detail_error"] = f"detail not captured: {type(e).__name__}"
@@ -420,7 +427,7 @@ def expand_watchlist_and_attach_details(page, rows: List[Dict[str, Any]]) -> Lis
                 if not re.match(rf"^{re.escape(symbol)}\b", text):
                     raise RuntimeError(f"dialog symbol mismatch for {symbol}")
                 details = parse_watchlist_dialog_text(text, symbol)
-                row.update({k: clean_text(v) for k, v in details.items()})
+                row.update(clean_detail_values(details))
                 page.get_by_role("button", name="Close").last.click()
                 dialog.wait_for(state="hidden", timeout=5000)
                 last_error = ""

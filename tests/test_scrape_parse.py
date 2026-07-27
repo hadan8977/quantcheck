@@ -141,6 +141,21 @@ class ScrapeParseTests(unittest.TestCase):
         self.assertEqual(details["analyst_signal"], "Neutral -0.09")
         self.assertNotIn("gt_score", details)
 
+    def test_watchlist_dialog_marks_source_unavailable_details(self):
+        text = (
+            "CORT Health Technology Corcept Therapeutics Incorporated PRICE $90.89 "
+            "P/E (TTM) — Market Cap $10.25B Revenue (TTM) — "
+            "Revenue Growth (YoY) — Next Earnings — Analyst Consensus — "
+            "Headlines Corcept Therapeutics lifted its outlook Close"
+        )
+
+        details = parse_watchlist_dialog_text(text, "CORT")
+
+        self.assertEqual(details["next_earnings"], "")
+        self.assertTrue(details["next_earnings_unavailable"])
+        self.assertEqual(details["analyst_signal"], "")
+        self.assertTrue(details["analyst_signal_unavailable"])
+
     def test_merge_watchlist_api_scores_uses_native_score(self):
         rows = [{"symbol": "SNDK"}, {"symbol": "MXL"}]
         api_rows = [

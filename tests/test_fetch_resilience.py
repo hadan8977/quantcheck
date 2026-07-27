@@ -95,6 +95,23 @@ class FetchResilienceTests(unittest.TestCase):
         self.assertIn("Error", sent[0]["html_body"])
         self.assertIn("monthly rows stayed empty", sent[0]["html_body"])
 
+    def test_manual_test_email_success_resets_health_without_promoting_baseline(self):
+        with patch.object(picks_check, "fetch_current", return_value=VALID_DATA), \
+             patch.object(picks_check, "json_dump"), \
+             patch.object(picks_check.report, "export_excel", return_value=picks_check.OUTPUT / "test.xlsx"), \
+             patch.object(picks_check, "capture_logged_in_screenshots", return_value={}), \
+             patch.object(picks_check, "notify"), \
+             patch.object(picks_check, "write_health") as write_health:
+            picks_check.run_test_email()
+
+        write_health.assert_called_once()
+        health = write_health.call_args.kwargs
+        self.assertEqual(health["consecutive_failures"], 0)
+        self.assertIsNone(health["last_error"])
+        self.assertEqual(health["last_window"], "manual_test_email")
+        self.assertEqual(health["monthly_date"], VALID_DATA["monthly"]["pick_date"])
+        self.assertEqual(health["weekly_date"], VALID_DATA["weekly"]["pick_date"])
+
     def test_run_check_failure_notifies_admin_with_card_html(self):
         sent = []
 

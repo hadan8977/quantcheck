@@ -683,6 +683,15 @@ def run_test_email(recipient: str | None = None):
                 telegram_body=tg_body,
                 route=route,
             )
+        write_health(
+            last_run_at=now_utc(),
+            last_success_at=now_utc(),
+            last_error=None,
+            consecutive_failures=0,
+            last_window='manual_test_email',
+            monthly_date=data['monthly']['pick_date'],
+            weekly_date=data['weekly']['pick_date'],
+        )
         print(json.dumps({'status': 'test_notification_sent', 'excel': str(excel), 'raw': str(raw_path), 'screenshots': {k: str(v) for k, v in shots.items()}, 'recipient': recipient}, ensure_ascii=False, indent=2))
     except Exception as e:
         tb = traceback.format_exc()
