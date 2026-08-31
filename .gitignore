@@ -12,6 +12,12 @@ logs/
 .config/
 .tmp-live/
 notify_recipients.txt
+# state/ (above) already covers these, but they hold subscriber PII
+# (email addresses, membership dates) so they get an explicit rule too:
+# this must keep being ignored even if the blanket state/ rule is ever
+# narrowed for some other reason.
+state/memberships.json
+state/memberships.json.*.bak
 *.xlsx
 *.png
 *.jpg
