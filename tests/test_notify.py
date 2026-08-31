@@ -90,11 +90,17 @@ class NotifyTests(unittest.TestCase):
             return True
 
         with patch("quantcheck.gmail_api_notify.send_via_brevo_api", side_effect=fake_brevo), \
-             patch("quantcheck.gmail_api_notify.send_via_smtp") as smtp:
+             patch("quantcheck.gmail_api_notify.send_via_smtp") as smtp, \
+             patch("quantcheck.gmail_api_notify._ledger_record") as ledger:
             self.assertTrue(send_email("Subject", "Body", to=["a@example.com", "b@example.com"]))
 
         self.assertEqual(calls, [["a@example.com"], ["b@example.com"]])
         smtp.assert_not_called()
+        # Regression guard: this test must never append fixture recipients to
+        # the real production logs/email_delivery_ledger.jsonl. See
+        # docs/SITE_CHANGE_REPAIR.md A5 for the incident this repeats if it
+        # regresses (same failure mode, different file).
+        self.assertEqual(ledger.call_count, 2)
 
     def test_email_provider_brevo_bypasses_gmail_and_smtp(self):
         calls = []
