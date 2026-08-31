@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from quantcheck.config import load_env
 from quantcheck.email_templates import build_card_email_html
 from quantcheck.gmail_api_notify import refresh_gmail_credentials, send_email as deliver_email
-from quantcheck.notify_routes import EmailRoute, recipients_for_route
+from quantcheck.notify_routes import EmailRoute, enforcement_enabled, recipients_for_route
 from quantcheck.official_mail_forwarder import connect_imap
+from quantcheck.service import ServiceError
+from quantcheck.service import members as members_svc
 
 ROOT = Path(os.environ.get("QUANTCHECK_HOME", Path(__file__).resolve().parents[1]))
 STATE = ROOT / "state"
@@ -87,6 +89,38 @@ def official_mail_reader_status(env: dict[str, str]) -> tuple[str, str, str]:
     return "Official Mail Reader", "error", f"unsupported provider={provider}"
 
 
+def membership_cards(env: dict[str, str]) -> list[dict]:
+    """Membership countdown section for the 2026-10-09 enforcement cliff:
+    everyone migrated on 2026-08-31 expires at the same instant unless
+    individually renewed first. This section exists so that gets watched
+    every day between now and then, not discovered the hard way on 10-09.
+    """
+    enforcement = enforcement_enabled(env)
+    enforcement_card = {
+        "label": "Membership Enforcement",
+        "value": "on" if enforcement else "OFF (MEMBERSHIP_ENFORCEMENT=0 kill switch active)",
+        "tone": "neutral" if enforcement else "error",
+    }
+    try:
+        report = members_svc.expiring_report(within_days=14, root=ROOT)
+    except ServiceError as exc:
+        return [enforcement_card, {"label": "Membership", "value": f"error reading state/memberships.json: {exc.message}", "tone": "error"}]
+
+    now = datetime.fromisoformat(report["as_of"])
+    cutoff_7d = now + timedelta(days=7)
+    expiring_7d = [m for m in report["expiring"] if m["expires_at"] and datetime.fromisoformat(m["expires_at"]) <= cutoff_7d]
+    expiring_list = ", ".join(f"{m['email']} ({m['expires_at']})" for m in report["expiring"]) or "none"
+
+    return [
+        enforcement_card,
+        {"label": "Members Active", "value": report["active_count"]},
+        {"label": "Members Expiring <=7d", "value": len(expiring_7d), "tone": "warning" if expiring_7d else "neutral"},
+        {"label": "Members Expiring <=14d", "value": report["expiring_count"], "tone": "warning" if report["expiring_count"] else "neutral"},
+        {"label": "Members Expired", "value": report["expired_count"], "tone": "error" if report["expired_count"] else "neutral"},
+        {"label": "Expiring Within 14d", "value": expiring_list[:1500]},
+    ]
+
+
 def build_status(env: dict[str, str]) -> tuple[str, str, str]:
     now_utc = datetime.now(timezone.utc)
     now_ny = now_utc.astimezone(NY)
@@ -124,6 +158,7 @@ def build_status(env: dict[str, str]) -> tuple[str, str, str]:
             "label": "Official Mail State",
             "value": json.dumps(official, ensure_ascii=True, sort_keys=True)[:1200] or "missing",
         },
+        *membership_cards(env),
     ]
     subject = f"Quant GT Daily Admin Status - {now_ny.strftime('%Y-%m-%d')}"
     body = "\n".join(f"{card['label']}: {card['value']}" for card in cards)
