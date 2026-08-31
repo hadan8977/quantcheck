@@ -106,6 +106,25 @@ class ScrapeParseTests(unittest.TestCase):
             }],
         )
 
+    def test_rows_from_watchlist_card_layout_without_price(self):
+        # Quant GT's Watchlist card stopped rendering an inline $price; only
+        # the symbol is safely extractable from the remaining text, and the
+        # row is still tagged watchlist so downstream code enriches it from
+        # the authenticated Watchlist API instead of rejecting it outright.
+        cards = ["CORT Corcept Therapeutics Incorporated Health Technology"]
+
+        self.assertEqual(
+            rows_from_card_texts(cards, "weekly"),
+            [{"symbol": "CORT", "source_kind": "watchlist"}],
+        )
+
+    def test_legacy_weekly_card_with_gt_score_is_not_treated_as_priceless_watchlist(self):
+        cards = ["Company: Gamma Ltd Symbol: GAMA Sector: Energy Rating: Buy GT Score: 82"]
+
+        rows = rows_from_card_texts(cards, "weekly")
+
+        self.assertEqual(rows, [{"company": "Gamma Ltd", "symbol": "GAMA", "sector": "Energy", "rating": "Buy", "gt_score": "82"}])
+
     def test_watchlist_dialog_details_restore_legacy_weekly_fields(self):
         text = (
             "SNDK Electronic Technology Sandisk Corporation PRICE $1,915.92 "
@@ -169,6 +188,34 @@ class ScrapeParseTests(unittest.TestCase):
         self.assertEqual(merged[0]["gt_score_source"], "weekly_api_score")
         self.assertEqual(merged[1]["gt_score"], "4.85/5")
 
+    def test_merge_watchlist_api_scores_backfills_missing_company_sector_price(self):
+        rows = [{"symbol": "CORT", "source_kind": "watchlist"}]
+        api_rows = [{
+            "ticker": "CORT",
+            "name": "Corcept Therapeutics Incorporated",
+            "sector": "Health Technology",
+            "price": None,
+            "sell_price": 113.88,
+            "score": 4.7075,
+        }]
+
+        merged = merge_watchlist_api_scores(rows, api_rows)
+
+        self.assertEqual(merged[0]["company"], "Corcept Therapeutics Incorporated")
+        self.assertEqual(merged[0]["sector"], "Health Technology")
+        self.assertEqual(merged[0]["current_price"], "$113.88")
+        self.assertEqual(merged[0]["gt_score"], "4.71/5")
+
+    def test_merge_watchlist_api_scores_does_not_override_card_supplied_fields(self):
+        rows = [{"symbol": "SNDK", "company": "Card Company", "sector": "Card Sector", "current_price": "$2,032.22"}]
+        api_rows = [{"ticker": "SNDK", "name": "API Company", "sector": "API Sector", "sell_price": 1.0, "score": 4.5}]
+
+        merged = merge_watchlist_api_scores(rows, api_rows)
+
+        self.assertEqual(merged[0]["company"], "Card Company")
+        self.assertEqual(merged[0]["sector"], "Card Sector")
+        self.assertEqual(merged[0]["current_price"], "$2,032.22")
+
     def test_analyst_consensus_is_a_detail_label_boundary(self):
         cards = ["Company: Gamma Ltd Symbol: GAMA Sector: Energy Analyst Consensus Buy +0.12 Momentum 1.9/2 GT Score: 82"]
 
@@ -188,6 +235,13 @@ class ScrapeParseTests(unittest.TestCase):
         text = "Portfolio Return Latest Holdings Updated on July 1, 2026 MTD -4.38% COMPANY SYMBOL"
 
         self.assertEqual(extract_pick_date(text, "monthly"), "Updated on July 1, 2026")
+
+    def test_monthly_updated_date_without_year_is_supported(self):
+        # Current Quant GT Portfolio page drops the year/comma and glues the
+        # MTD badge directly onto the day number with no separating space.
+        text = "Latest holdings Updated August 1MTD +6.25% SYMBOL COMPANY ENTRY DATE PRICE"
+
+        self.assertEqual(extract_pick_date(text, "monthly"), "Updated August 1")
 
     def test_week_of_date_is_supported(self):
         text = "Weekly Picks Guidance only Week of May 25, 2026 COMPANY SYMBOL SECTOR"

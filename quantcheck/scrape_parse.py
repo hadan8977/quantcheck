@@ -69,6 +69,12 @@ WATCHLIST_CARD_RE = re.compile(
     r"^(?P<symbol>[A-Z][A-Z0-9.]{0,5})\s+(?P<company>.+?)\s+(?P<price>\$[0-9][0-9,.]*(?:\.\d+)?)\s+(?P<sector>[A-Za-z][A-Za-z &/.-]+)$"
 )
 
+# Quant GT's Watchlist card stopped rendering an inline $price (only symbol,
+# company, and sector remain), which makes company/sector unsplittable by
+# regex alone. Only the symbol is unambiguous here; company/sector/price are
+# backfilled from the authenticated Watchlist API response instead.
+WATCHLIST_CARD_SYMBOL_ONLY_RE = re.compile(r"^(?P<symbol>[A-Z][A-Z0-9.]{0,5})(?:\s+\S+){2,}$")
+
 
 def canonical_header(value: Any) -> str | None:
     return HEADER_ALIASES.get(normalize_header(value))
@@ -81,6 +87,12 @@ def extract_pick_date(text: str, mode: str) -> str:
         if match:
             return match.group(0)
         match = re.search(rf"\bUpdated\s+(?:{MONTHS})\s+\d{{1,2}},\s+\d{{4}}\b", clean, re.I)
+        if match:
+            return match.group(0)
+        # No comma/year at all, and the day number can run directly into an
+        # adjacent "MTD +N%" badge with no separating space (e.g.
+        # "Updated August 1MTD +6.25%"), so the day can't be closed with \b.
+        match = re.search(rf"\bUpdated\s+(?:{MONTHS})\s+\d{{1,2}}(?!\d)", clean, re.I)
         if match:
             return match.group(0)
         match = re.search(rf"\b(?:{MONTHS})\s+(?:Holdings\s+)?\d{{2}}/\d{{2}}/\d{{2}}\s*-\s*(?:now|present|current)\b", clean, re.I)
@@ -187,6 +199,13 @@ def row_from_card_text(text: str, mode: str) -> Dict[str, Any] | None:
                 "sector": clean_text(watchlist_match.group("sector")),
                 "source_kind": "watchlist",
             }
+        if not re.search(r"\bGT\s*Score\b", clean, re.I):
+            symbol_only_match = WATCHLIST_CARD_SYMBOL_ONLY_RE.match(clean)
+            if symbol_only_match:
+                return {
+                    "symbol": symbol_only_match.group("symbol"),
+                    "source_kind": "watchlist",
+                }
     symbol_match = re.search(r"\b[A-Z][A-Z0-9.]{0,5}\b", clean)
     score_match = re.search(r"\bGT\s*Score\b[:\s]*([0-9]+(?:\.[0-9]+)?)", clean, re.I)
     if not symbol_match or not score_match:

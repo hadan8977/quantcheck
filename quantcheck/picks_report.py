@@ -77,7 +77,7 @@ def has_auth_session(page) -> bool:
 def is_watchlist_page(page) -> bool:
     try:
         return bool(page.evaluate(
-            """() => {
+            r"""() => {
               const text = (document.querySelector('main')?.innerText || document.body.innerText || '').replace(/\s+/g, ' ');
               const title = document.title || '';
               return /\/weekly-picks\b/i.test(location.pathname) || /\bWatchlist\b/i.test(title) || /\bWatchlist\b/i.test(text);
@@ -244,7 +244,7 @@ def rows_from_table(page, mode: str) -> List[Dict[str, Any]]:
         .filter(row => row.some(Boolean));
       const cards = [...document.querySelectorAll('main article, main [data-slot*="card"], main [class*="card"], main [class*="Card"]')]
         .map(el => clean(el.innerText || el.textContent))
-        .filter(text => text && (/GT\s*Score|Rating|Sector|Held Since|Return/i.test(text) || (mode === 'weekly' && /^([A-Z][A-Z0-9.]{0,5})\s+.+\s+\$[0-9]/.test(text))));
+        .filter(text => text && (/GT\s*Score|Rating|Sector|Held Since|Return/i.test(text) || (mode === 'weekly' && /^[A-Z][A-Z0-9.]{0,5}(\s+\S+){2,}/.test(text))));
       return {matrix: tableRows.length ? tableRows : ariaRows, cards};
     }
     """
@@ -368,7 +368,8 @@ def format_watchlist_score(value: Any) -> str:
 
 
 def merge_watchlist_api_scores(rows: List[Dict[str, Any]], api_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Attach the authenticated Watchlist API's native score to matching cards."""
+    """Attach the authenticated Watchlist API's native score, and backfill
+    company/sector/current_price when the card text no longer renders them."""
     api_by_symbol = {
         clean_text(item.get("ticker")).upper(): item
         for item in api_rows
@@ -384,6 +385,16 @@ def merge_watchlist_api_scores(rows: List[Dict[str, Any]], api_rows: List[Dict[s
             continue
         row["gt_score"] = score
         row["gt_score_source"] = "weekly_api_score"
+        if not row.get("company") and item.get("name"):
+            row["company"] = clean_text(item.get("name"))
+        if not row.get("sector") and item.get("sector"):
+            row["sector"] = clean_text(item.get("sector"))
+        if not row.get("current_price"):
+            api_price = item.get("sell_price")
+            if api_price is None:
+                api_price = item.get("price")
+            if isinstance(api_price, (int, float)):
+                row["current_price"] = f"${api_price:,.2f}"
     if missing:
         raise RuntimeError("watchlist API response missing valid GT Score for: " + ", ".join(missing[:5]))
     return rows
@@ -415,7 +426,11 @@ def expand_watchlist_and_attach_details(page, rows: List[Dict[str, Any]]) -> Lis
         paywall_detected = False
         for _ in range(2):
             try:
-                page.get_by_text(symbol, exact=True).first.click()
+                # Scope to <main>: a page chrome element (e.g. an account
+                # avatar showing a single-letter initial) can have the exact
+                # same text as a short ticker like "U" and would otherwise
+                # win page-wide text matching, opening the wrong element.
+                page.locator("main").get_by_text(symbol, exact=True).first.click()
                 dialog = page.locator('[role="dialog"]')
                 dialog.wait_for(state="visible", timeout=8000)
                 text = clean_text(dialog.inner_text(timeout=5000))

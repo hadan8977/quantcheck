@@ -514,7 +514,7 @@ def _wait_for_screenshot_ready(page, name: str) -> None:
         raise RuntimeError(f'weekly screenshot not ready: expected 10 parsed rows, got {len(rows)}')
     try:
         page.wait_for_function(
-            """(mode) => {
+            r"""(mode) => {
               const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
               if (mode === 'weekly') {
                 const text = (document.querySelector('main')?.innerText || document.body.innerText || '').replace(/\s+/g, ' ');
@@ -531,6 +531,19 @@ def _wait_for_screenshot_ready(page, name: str) -> None:
     except PlaywrightTimeoutError:
         pass
     page.wait_for_timeout(1000)
+
+
+def dismiss_screenshot_overlays(page) -> None:
+    """Close optional product tours so email screenshots show unobscured data."""
+    dialog = page.get_by_role('dialog', name=re.compile(r'Latest Holdings', re.I))
+    if dialog.count() == 0:
+        return
+    close = dialog.get_by_role('button', name=re.compile(r'close', re.I))
+    if close.count() == 0:
+        close = dialog.locator('button[aria-label*="close" i], button:has-text("×")')
+    if close.count() > 0:
+        close.click(timeout=3000)
+        page.wait_for_timeout(300)
 
 
 def _assert_screenshot_symbols_match(page, name: str, expected_rows: List[Dict[str, Any]]) -> None:
@@ -565,6 +578,7 @@ def capture_logged_in_screenshots(which: List[str], expected_data: Dict[str, Any
                 pass
             page.wait_for_timeout(1500)
             _wait_for_screenshot_ready(page, name)
+            dismiss_screenshot_overlays(page)
             if report.is_login_prompt_visible(page):
                 raise RuntimeError(f'{name} page is not authenticated: login prompt visible')
             if not report.has_picks_content(page):
