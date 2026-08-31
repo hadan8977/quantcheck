@@ -184,6 +184,47 @@ QUANTCHECK_SCHEDULE=08:20:official_mail,08:30:picks,08:45:health_site,09:00:pick
 
 Allowed job kinds are `picks`, `health_site`, `health`, `official_mail`, and `daily_admin_status`.
 
+## Membership
+
+Picks-update mail (and forwarded official Quant GT mail, same route) is
+gated by `state/memberships.json`: a subscriber whose membership has
+expired is excluded, everyone else -- including anyone with no membership
+record at all -- is included. Full detail, including the billing-window
+rule and the 2026-10-09 migration cliff, is in
+[Membership](MEMBERSHIP.md). The operationally important bits:
+
+```env
+MEMBERSHIP_ENFORCEMENT=0   # kill switch: disables filtering instantly, does not require the store to be readable
+```
+
+```bash
+quantcheck-admin route preview           # who actually gets mail right now
+quantcheck-admin members list --expiring-days 14
+quantcheck-admin ops diagnose            # includes a membership_store finding
+```
+
+`logs/notify_routes.log` gets a `subscribers=N active=M excluded=K` line on
+every real send, and lists excluded addresses by name when `K > 0`. The
+daily admin status email includes a membership countdown section (active /
+expiring-within-7d / expiring-within-14d / expired counts, plus the actual
+list of who's expiring soon) so the 2026-10-09 cliff is visible every day
+leading up to it, not discovered after the fact.
+
+## Agent Tooling
+
+`quantcheck-admin` (JSON CLI) and `quantcheck-mcp` (MCP stdio server) expose
+membership CRUD and the operational commands above for scripts and agents.
+Neither opens a network listener. Full reference, including the complete
+MCP tool list and how to register `quantcheck-mcp` with Claude Code, is in
+[Agent API](AGENT_API.md).
+
+```bash
+quantcheck-admin ops status
+quantcheck-admin ops diagnose
+quantcheck-admin ops run picks               # unforced: safe, no --confirm needed
+quantcheck-admin ops run picks --force --confirm   # force can send real mail; confirm is required
+```
+
 ## Runtime Files
 
 - `state/latest_picks.json`: latest valid source state
@@ -192,9 +233,12 @@ Allowed job kinds are `picks`, `health_site`, `health`, `official_mail`, and `da
 - `state/site_snapshot_latest.json`: latest site snapshot
 - `state/official_mail_forwarder_state.json`: official email forwarding dedupe state
 - `state/health.json`: monitor health state
+- `state/memberships.json`: membership records (subscriber PII, never committed; see [Membership](MEMBERSHIP.md))
+- `state/quantcheck.lock`: scheduler lock, also reused by `quantcheck-admin ops run` / the MCP `ops_run_job` tool so neither can race the daemon
 - `output/`: Excel reports
 - `screenshots/`: captured screenshots
 - `logs/`: scheduler, monitor, health, and email logs
+- `logs/notify_routes.log`: membership filter decisions (subscribers/active/excluded counts on every real send)
 - `browser-profile/`: Playwright persistent login profile
 
 ## Troubleshooting
@@ -208,6 +252,7 @@ Login fails or picks table is empty:
 No email arrives:
 
 - For picks-update reports, check `NOTIFY_EMAIL_FILE` / `NOTIFY_EMAIL_TO` and `NOTIFY_ADMIN_EMAIL_FILE` / `NOTIFY_ADMIN_EMAIL_TO`.
+- One specific subscriber not receiving picks-update mail: run `quantcheck-admin route preview` and check whether they're in `excluded` (with a `reason`) -- their membership may have expired. If membership filtering itself is suspected of being wrong, `MEMBERSHIP_ENFORCEMENT=0` disables it instantly; see [Membership](MEMBERSHIP.md).
 - For failures, health alerts, website changes, and test emails, check `NOTIFY_ADMIN_EMAIL_FILE` or `NOTIFY_ADMIN_EMAIL_TO`.
 - For official email forwarding, check `OFFICIAL_MAIL_PROVIDER=imap`, `OFFICIAL_MAIL_IMAP_*` settings, and `logs/official_mail_forwarder.log`.
 - Check `logs/quantcheck_email.log`.
@@ -228,7 +273,9 @@ Daemon appears stuck:
 
 ## Safety
 
-- Never commit `.env`, `.config/`, `browser-profile/`, output reports, screenshots, logs, or raw state.
+- Never commit `.env`, `.config/`, `browser-profile/`, output reports, screenshots, logs, raw state, or `state/memberships.json` (subscriber PII).
 - If credentials or tokens are exposed, rotate them immediately and delete exposed runtime files from the server.
 - Failed or partial scrapes must not overwrite `state/latest_picks.json`.
 - Job timeouts should be logged and contained so the daemon keeps running.
+- Membership filtering fails OPEN, never closed: a broken or missing `state/memberships.json` results in every subscriber being treated as valid, not silently dropped. See [Membership](MEMBERSHIP.md).
+- `quantcheck-admin ops run` / the MCP `ops_run_job` tool require an explicit `confirm=true` for anything that can send real subscriber mail (`test_email`, `picks --force`). Test sends must always target a single admin address (`--recipient`, or the `ADMIN` route) -- never the real subscriber list.

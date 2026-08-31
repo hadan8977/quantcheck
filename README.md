@@ -15,6 +15,7 @@ It replaces a Hermes CronJob-style scheduler with a small self-contained Python 
 - Email delivery through Amazon SES API, SMTP, or Gmail API.
 - Built-in New York time scheduler, file lock, timeouts, health checks, and logs.
 - Site snapshots for Quant GT Picks, TradingView Indicator, AI Winners, RRG, Market Tools, and Study Guide pages.
+- Membership-gated picks-update mail (9th-of-the-month billing anchor, fail-open by design) with a JSON CLI and an MCP server for agent-driven administration.
 
 ## Requirements
 
@@ -84,6 +85,12 @@ quantcheck-recipients remove old@example.com --dry-run
 python -m compileall -q quantcheck tests
 python -m unittest discover -s tests -v
 
+# Membership and operations, JSON-first (agent-friendly; add --human for a table).
+quantcheck-admin members list --status active
+quantcheck-admin route preview
+quantcheck-admin ops status
+quantcheck-admin ops diagnose
+
 # Install as a systemd service.
 sudo rsync -a ./ /opt/quantcheck/
 cd /opt/quantcheck
@@ -95,10 +102,10 @@ sudo systemctl enable --now quantcheck.service
 
 ## Runtime Files
 
-- `state/`: latest/previous pick state, health state, raw audit captures, site snapshots.
+- `state/`: latest/previous pick state, health state, raw audit captures, site snapshots, `memberships.json` (subscriber PII).
 - `output/`: Excel reports.
 - `screenshots/`: captured screenshots.
-- `logs/`: scheduler, monitor, health, and email logs.
+- `logs/`: scheduler, monitor, health, email, and `notify_routes.log` (membership filter decisions).
 - `browser-profile/`: Playwright persistent login profile.
 
 These paths are ignored by git.
@@ -107,10 +114,15 @@ These paths are ignored by git.
 
 - [Operations](docs/OPERATIONS.md): production deployment, schedule, credentials, logs, and troubleshooting.
 - [Development](docs/DEVELOPMENT.md): project structure, tests, and maintenance notes.
+- [Membership](docs/MEMBERSHIP.md): the 9th-of-the-month billing rule, storage format, fail-open guarantee, and the 2026-10-09 migration cliff.
+- [Agent API](docs/AGENT_API.md): `quantcheck-admin` JSON CLI reference and the `quantcheck-mcp` MCP tool list.
+- [Site Change Repair](docs/SITE_CHANGE_REPAIR.md): diagnostic checklist for "quantgt.io changed again" / "no email arrived."
 
 ## Safety Notes
 
-- Never commit `.env`, `.config/`, `browser-profile/`, reports, screenshots, logs, or raw state.
+- Never commit `.env`, `.config/`, `browser-profile/`, reports, screenshots, logs, raw state, or `state/memberships.json` (subscriber PII).
 - Friends in `NOTIFY_EMAIL_TO` only receive successful picks-update reports; admin recipients receive all operator mail.
+- Membership filtering fails OPEN: a broken/missing `state/memberships.json`, or a subscriber with no membership record, is always treated as a valid recipient rather than silently dropped. See [Membership](docs/MEMBERSHIP.md).
 - Failed or partial scrapes must not overwrite `state/latest_picks.json`.
 - No notification should be sent on no-change runs.
+- `quantcheck-admin` / `quantcheck-mcp` never send subscriber mail without an explicit confirmation step, and neither exposes the ability to actually send a historical resend -- only its preview. See [Agent API](docs/AGENT_API.md).
