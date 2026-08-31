@@ -1,3 +1,5 @@
+import fcntl
+import json
 import unittest
 import tempfile
 from email.message import EmailMessage
@@ -12,6 +14,7 @@ from quantcheck.official_mail_forwarder import (
     main,
     matches_official_mail,
     official_mail_from_message,
+    search_query,
     split_patterns,
 )
 
@@ -21,6 +24,10 @@ class OfficialMailForwarderTests(unittest.TestCase):
         self.assertEqual(split_patterns("", ["quantgt"]), [])
         self.assertEqual(split_patterns(None, ["quantgt"]), ["quantgt"])
         self.assertEqual(split_patterns("QuantGT; Picks\nHoldings", []), ["quantgt", "picks", "holdings"])
+
+    def test_imap_search_defaults_to_official_sender_without_unseen_filter(self):
+        self.assertEqual(search_query({}), 'FROM "quantgt.io"')
+        self.assertEqual(search_query({"OFFICIAL_MAIL_IMAP_SEARCH": "UNSEEN"}), "UNSEEN")
 
     def test_message_body_and_headers_are_decoded(self):
         msg = EmailMessage()
@@ -101,13 +108,17 @@ class OfficialMailForwarderTests(unittest.TestCase):
         self.assertIn("<p>The picks changed.</p>", html)
 
     def test_forwarder_is_disabled_by_default(self):
-        with patch("quantcheck.official_mail_forwarder.connect_imap") as connect_imap:
-            result = forward_official_mail({
-                "NOTIFY_EMAIL_TO": "friend@example.com",
-                "NOTIFY_EMAIL_FILE": "",
-                "NOTIFY_ADMIN_EMAIL_TO": "admin@example.com",
-                "NOTIFY_ADMIN_EMAIL_FILE": "",
-            })
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("quantcheck.official_mail_forwarder.connect_imap") as connect_imap,
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
+            ):
+                result = forward_official_mail({
+                    "NOTIFY_EMAIL_TO": "friend@example.com",
+                    "NOTIFY_EMAIL_FILE": "",
+                    "NOTIFY_ADMIN_EMAIL_TO": "admin@example.com",
+                    "NOTIFY_ADMIN_EMAIL_FILE": "",
+                })
 
         self.assertEqual(result["skipped"], "disabled")
         connect_imap.assert_not_called()
@@ -165,6 +176,7 @@ class OfficialMailForwarderTests(unittest.TestCase):
             }
             with (
                 patch("quantcheck.official_mail_forwarder.STATE_FILE", state_file),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
                 patch("quantcheck.official_mail_forwarder.list_gmail_messages", return_value=messages),
                 patch("quantcheck.official_mail_forwarder.mark_gmail_message_read") as mark_read,
                 patch("quantcheck.official_mail_forwarder.deliver_email", return_value=(["ok@example.com"], [])) as deliver,
@@ -215,6 +227,7 @@ class OfficialMailForwarderTests(unittest.TestCase):
             }
             with (
                 patch("quantcheck.official_mail_forwarder.STATE_FILE", state_file),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
                 patch("quantcheck.official_mail_forwarder.connect_imap", return_value=FakeImap()),
                 patch("quantcheck.official_mail_forwarder.deliver_email", return_value=(["ok@example.com"], [])) as deliver,
             ):
@@ -262,6 +275,7 @@ class OfficialMailForwarderTests(unittest.TestCase):
             }
             with (
                 patch("quantcheck.official_mail_forwarder.STATE_FILE", state_file),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
                 patch("quantcheck.official_mail_forwarder.connect_imap", return_value=FakeImap()),
                 patch("quantcheck.official_mail_forwarder.deliver_email", return_value=(["ok@example.com"], [])) as deliver,
             ):
@@ -310,6 +324,7 @@ class OfficialMailForwarderTests(unittest.TestCase):
             }
             with (
                 patch("quantcheck.official_mail_forwarder.STATE_FILE", state_file),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
                 patch("quantcheck.official_mail_forwarder.connect_imap", return_value=FakeImap()),
                 patch("quantcheck.official_mail_forwarder.deliver_email", return_value=(["friend@example.com"], ["admin@example.com"])) as deliver,
             ):
@@ -355,14 +370,18 @@ class OfficialMailForwarderTests(unittest.TestCase):
             "OFFICIAL_MAIL_IMAP_PASSWORD": "secret",
             "OFFICIAL_MAIL_IMAP_SECURITY": "starttls",
         }
-        with (
-            patch.dict("os.environ", env, clear=True),
-            patch("quantcheck.official_mail_forwarder.load_env"),
-            patch("quantcheck.official_mail_forwarder.connect_imap", return_value=FakeImap()),
-            patch("quantcheck.official_mail_forwarder.deliver_email", side_effect=[([], ["friend@example.com", "admin@example.com"]), (["admin@example.com"], [])]) as deliver,
-            patch("sys.argv", ["quantcheck-official-mail"]),
-        ):
-            main()
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict("os.environ", env, clear=True),
+                patch("quantcheck.official_mail_forwarder.load_env"),
+                patch("quantcheck.official_mail_forwarder.LOCK_FILE", Path(tmp) / "forwarder.lock"),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
+                patch("quantcheck.official_mail_forwarder.STATE_FILE", Path(tmp) / "forwarder_state.json"),
+                patch("quantcheck.official_mail_forwarder.connect_imap", return_value=FakeImap()),
+                patch("quantcheck.official_mail_forwarder.deliver_email", side_effect=[([], ["friend@example.com", "admin@example.com"]), (["admin@example.com"], [])]) as deliver,
+                patch("sys.argv", ["quantcheck-official-mail"]),
+            ):
+                main()
 
         self.assertEqual(deliver.call_count, 2)
         self.assertEqual(deliver.call_args_list[0].kwargs["to"], ["friend@example.com", "admin@example.com"])
@@ -384,21 +403,116 @@ class OfficialMailForwarderTests(unittest.TestCase):
             "OFFICIAL_MAIL_IMAP_PASSWORD": "secret",
             "OFFICIAL_MAIL_IMAP_SECURITY": "starttls",
         }
-        with (
-            patch.dict("os.environ", env, clear=True),
-            patch("quantcheck.official_mail_forwarder.load_env"),
-            patch("quantcheck.official_mail_forwarder.connect_imap", side_effect=RuntimeError("imap down")),
-            patch("quantcheck.official_mail_forwarder.deliver_email", return_value=(["ok@example.com"], [])) as deliver,
-            patch("sys.argv", ["quantcheck-official-mail"]),
-        ):
-            with self.assertRaises(RuntimeError):
-                main()
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict("os.environ", env, clear=True),
+                patch("quantcheck.official_mail_forwarder.load_env"),
+                patch("quantcheck.official_mail_forwarder.LOCK_FILE", Path(tmp) / "forwarder.lock"),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
+                patch("quantcheck.official_mail_forwarder.STATE_FILE", Path(tmp) / "forwarder_state.json"),
+                patch("quantcheck.official_mail_forwarder.connect_imap", side_effect=RuntimeError("imap down")),
+                patch("quantcheck.official_mail_forwarder.deliver_email", return_value=(["ok@example.com"], [])) as deliver,
+                patch("sys.argv", ["quantcheck-official-mail"]),
+            ):
+                with self.assertRaises(RuntimeError):
+                    main()
 
         deliver.assert_called_once()
         self.assertEqual(deliver.call_args.kwargs["to"], ["admin@example.com"])
         self.assertIn("html", deliver.call_args.kwargs)
         self.assertIn("Quant GT Monitor", deliver.call_args.kwargs["html"])
         self.assertIn("Official Mail Check Failed", deliver.call_args.kwargs["html"])
+
+    def test_forward_state_is_persisted_per_message_not_only_at_end(self):
+        # A run that sends one mail and then dies before its own final save
+        # (crash, or another run interrupting it) must not lose the dedupe
+        # record for the mail it already sent for real.
+        first_msg = EmailMessage()
+        first_msg["From"] = "Quant GT <support@quantgt.io>"
+        first_msg["Subject"] = "Monthly Picks Updated"
+        first_msg["Date"] = "Mon, 25 May 2026 08:00:00 +0000"
+        first_msg.set_content("First update.")
+
+        second_msg = EmailMessage()
+        second_msg["From"] = "Quant GT <support@quantgt.io>"
+        second_msg["Subject"] = "Weekly picks changed"
+        second_msg["Date"] = "Tue, 26 May 2026 08:00:00 +0000"
+        second_msg.set_content("Second update.")
+
+        class FakeImap:
+            def select(self, mailbox, readonly=True):
+                return "OK", []
+
+            def uid(self, command, *args):
+                if command == "search":
+                    return "OK", [b"1 2"]
+                if command == "fetch":
+                    uid = args[0]
+                    body = first_msg.as_bytes() if uid == "1" else second_msg.as_bytes()
+                    return "OK", [(f"{uid} (RFC822 {{1}}".encode(), body)]
+                raise AssertionError(command)
+
+            def logout(self):
+                return "OK", []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "official_mail_forwarder_state.json"
+            env = {
+                "OFFICIAL_MAIL_ENABLED": "1",
+                "OFFICIAL_MAIL_PROVIDER": "imap",
+                "NOTIFY_EMAIL_TO": "friend@example.com",
+                "NOTIFY_EMAIL_FILE": "",
+                "NOTIFY_ADMIN_EMAIL_TO": "admin@example.com",
+                "NOTIFY_ADMIN_EMAIL_FILE": "",
+                "OFFICIAL_MAIL_IMAP_HOST": "imap.example.com",
+                "OFFICIAL_MAIL_IMAP_USERNAME": "receiver@example.com",
+                "OFFICIAL_MAIL_IMAP_PASSWORD": "secret",
+            }
+            with (
+                patch("quantcheck.official_mail_forwarder.STATE_FILE", state_file),
+                patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
+                patch("quantcheck.official_mail_forwarder.connect_imap", return_value=FakeImap()),
+                patch(
+                    "quantcheck.official_mail_forwarder.deliver_email",
+                    side_effect=[(["ok@example.com"], []), RuntimeError("simulated crash mid-run")],
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    forward_official_mail(env)
+
+            self.assertTrue(state_file.exists())
+            persisted = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(len(persisted.get("forwarded") or []), 1)
+
+    def test_main_skips_when_lock_is_already_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "forwarder.lock"
+            held_handle = lock_path.open("w")
+            fcntl.flock(held_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                env = {
+                    "OFFICIAL_MAIL_ENABLED": "1",
+                    "OFFICIAL_MAIL_PROVIDER": "imap",
+                    "NOTIFY_EMAIL_TO": "friend@example.com",
+                    "NOTIFY_EMAIL_FILE": "",
+                    "NOTIFY_ADMIN_EMAIL_TO": "admin@example.com",
+                    "NOTIFY_ADMIN_EMAIL_FILE": "",
+                    "OFFICIAL_MAIL_IMAP_HOST": "imap.example.com",
+                    "OFFICIAL_MAIL_IMAP_USERNAME": "receiver@example.com",
+                    "OFFICIAL_MAIL_IMAP_PASSWORD": "secret",
+                }
+                with (
+                    patch.dict("os.environ", env, clear=True),
+                    patch("quantcheck.official_mail_forwarder.load_env"),
+                    patch("quantcheck.official_mail_forwarder.LOCK_FILE", lock_path),
+                    patch("quantcheck.official_mail_forwarder.LOG_FILE", Path(tmp) / "forwarder.log"),
+                    patch("quantcheck.official_mail_forwarder.connect_imap") as connect_imap,
+                    patch("sys.argv", ["quantcheck-official-mail"]),
+                ):
+                    main()
+                connect_imap.assert_not_called()
+            finally:
+                held_handle.close()
 
 
 if __name__ == "__main__":

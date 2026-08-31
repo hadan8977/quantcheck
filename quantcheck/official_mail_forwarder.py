@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import email
+import fcntl
 import hashlib
 import html as html_lib
 import imaplib
@@ -30,6 +31,13 @@ STATE = ROOT / "state"
 LOGS = ROOT / "logs"
 LOG_FILE = LOGS / "official_mail_forwarder.log"
 STATE_FILE = STATE / "official_mail_forwarder_state.json"
+# Separate from the scheduler's own state/quantcheck.lock: that lock is held by
+# the parent scheduler process for the whole duration of a scheduled job,
+# including while it runs this module as a subprocess, so reusing it here
+# would make the subprocess dead-lock against its own parent. This lock only
+# has to stop two *forwarder* runs (manual CLI + scheduled, or two manual
+# runs) from racing each other and double-sending the same official email.
+LOCK_FILE = STATE / "official_mail_forwarder.lock"
 
 DEFAULT_SENDER_PATTERNS = ["@quantgt.io", "quant gt", "quantgt"]
 DEFAULT_SUBJECT_PATTERNS = ["quant gt", "quantgt", "picks", "holdings", "portfolio", "daily admin status", "updated"]
@@ -378,7 +386,7 @@ def fetch_message(client, uid: str) -> bytes:
 
 
 def search_query(env: Mapping[str, str]) -> str:
-    return env.get("OFFICIAL_MAIL_IMAP_SEARCH") or "UNSEEN"
+    return env.get("OFFICIAL_MAIL_IMAP_SEARCH") or 'FROM "quantgt.io"'
 
 
 def _record_forward(state: dict, forwarded: set[str], fingerprint: str, mail: OfficialMail, provider: str) -> None:
@@ -414,6 +422,13 @@ def _forward_mails(mails: Iterable[OfficialMail], env: Mapping[str, str], recipi
                     log(f"official mail send failed provider={provider} uid={mail.uid} subject={mail.subject!r}")
                 continue
             _record_forward(state, forwarded, fingerprint, mail, provider)
+            # Persist the dedupe fingerprint immediately, not just once at the
+            # end of the run. A run that sends several mails, then gets
+            # interrupted (service restart, crash) or overlaps with another
+            # invocation before reaching its own final save, must not leave
+            # an already-sent mail looking unforwarded to the next run.
+            state["forwarded"] = sorted(forwarded)
+            save_state(state)
         result["forwarded"] += 1
         result.setdefault("_forwarded_uids", []).append(mail.uid)
         log(f"forwarded official mail provider={provider} uid={mail.uid} subject={mail.subject!r} to={', '.join(recipients)}")
@@ -483,21 +498,29 @@ def main() -> None:
     args = parser.parse_args()
     load_env(ROOT)
     env = dict(os.environ)
-    try:
-        result = forward_official_mail(env, dry_run=args.dry_run)
-        if not args.dry_run:
-            alert_forward_failures(env, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    except Exception as exc:
-        tb = traceback.format_exc()
-        log(f"official mail forward failed: {exc}\n{tb}")
-        if env.get("OFFICIAL_MAIL_ENABLED", "0") == "1":
-            send_admin_alert(
-                env,
-                "Quant GT Official Mail Check Failed",
-                f"Error: {exc}\n\n{tb[-3000:]}",
-            )
-        raise
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("w") as lock_handle:
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("official mail forward skipped: another forwarder run holds the lock")
+            print(json.dumps({"checked": 0, "matched": 0, "forwarded": 0, "skipped": "locked"}, ensure_ascii=False, indent=2))
+            return
+        try:
+            result = forward_official_mail(env, dry_run=args.dry_run)
+            if not args.dry_run:
+                alert_forward_failures(env, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            tb = traceback.format_exc()
+            log(f"official mail forward failed: {exc}\n{tb}")
+            if env.get("OFFICIAL_MAIL_ENABLED", "0") == "1":
+                send_admin_alert(
+                    env,
+                    "Quant GT Official Mail Check Failed",
+                    f"Error: {exc}\n\n{tb[-3000:]}",
+                )
+            raise
 
 
 if __name__ == "__main__":
