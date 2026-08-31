@@ -84,6 +84,18 @@ class ScrapeParseTests(unittest.TestCase):
             }],
         )
 
+    def test_rows_from_monthly_table_header_using_entry_date_label(self):
+        # Quant GT renamed the Portfolio holdings table's "Held Since" column
+        # to "Entry Date"; the internal field name stays held_since.
+        matrix = [
+            ["SYMBOL", "COMPANY", "ENTRY DATE", "PRICE", "RETURN", "SECTOR", "GT SCORE"],
+            ["DELL", "Dell Technologies Inc.", "2026-08-03", "$456.24", "+14.73%", "Electronic Technology", "4.78/5"],
+        ]
+
+        rows = rows_from_matrix(matrix, "monthly")
+
+        self.assertEqual(rows[0]["held_since"], "2026-08-03")
+
     def test_rows_from_card_layout(self):
         cards = ["Company: Gamma Ltd Symbol: GAMA Sector: Energy Rating: Buy GT Score: 82"]
 

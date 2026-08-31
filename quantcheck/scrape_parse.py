@@ -51,6 +51,7 @@ HEADER_ALIASES = {
     "ticker": "symbol",
     "held_since": "held_since",
     "holding_since": "held_since",
+    "entry_date": "held_since",
     "price": "current_price",
     "current_price": "current_price",
     "last_price": "current_price",
