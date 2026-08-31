@@ -1,6 +1,8 @@
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -132,6 +134,58 @@ class HistoricalResendTests(unittest.TestCase):
             html=plan.html,
             retries=2,
         )
+
+    def test_cli_recipient_flag_sends_only_to_explicit_address_not_the_subscriber_route(self):
+        # --recipient is the admin-preview mode: --send must reach exactly
+        # the given address(es) and must never call subscriber_recipients
+        # (the real, full subscriber list), even though .env is loaded.
+        from quantcheck.historical_resend import main
+
+        (self.root / ".env").write_text("NOTIFY_EMAIL_TO=real-subscriber@example.com\n", encoding="utf-8")
+        argv = [
+            "historical_resend",
+            "--weekly-date", "Updated on Aug 7, 2026",
+            "--root", str(self.root),
+            "--send",
+            "--confirm-date", "Updated on Aug 7, 2026",
+            "--recipient", "admin@example.com",
+        ]
+        buf = io.StringIO()
+        with patch("quantcheck.historical_resend.send_email_per_recipient", return_value=(["admin@example.com"], [])) as sender, \
+             patch("quantcheck.historical_resend.subscriber_recipients") as subscriber_route, \
+             patch("sys.argv", argv), patch.dict("os.environ", {}, clear=True), redirect_stdout(buf):
+            main()
+
+        subscriber_route.assert_not_called()
+        sender.assert_called_once()
+        self.assertEqual(sender.call_args.kwargs["to"], ["admin@example.com"])
+        summary = json.loads(buf.getvalue())
+        self.assertEqual(summary["recipients_source"], "explicit_recipient")
+        self.assertEqual(summary["delivered"], 1)
+
+    def test_cli_without_recipient_flag_still_uses_the_full_subscriber_route(self):
+        # Backward compatibility: omitting --recipient must behave exactly
+        # like before this flag existed.
+        from quantcheck.historical_resend import main
+
+        (self.root / ".env").write_text("NOTIFY_EMAIL_TO=real-subscriber@example.com\n", encoding="utf-8")
+        argv = [
+            "historical_resend",
+            "--weekly-date", "Updated on Aug 7, 2026",
+            "--root", str(self.root),
+            "--send",
+            "--confirm-date", "Updated on Aug 7, 2026",
+        ]
+        buf = io.StringIO()
+        with patch(
+            "quantcheck.historical_resend.send_email_per_recipient",
+            return_value=(["real-subscriber@example.com"], []),
+        ) as sender, patch("sys.argv", argv), patch.dict("os.environ", {}, clear=True), redirect_stdout(buf):
+            main()
+
+        self.assertEqual(sender.call_args.kwargs["to"], ["real-subscriber@example.com"])
+        summary = json.loads(buf.getvalue())
+        self.assertEqual(summary["recipients_source"], "subscriber_route")
 
     def test_fails_closed_when_update_has_no_diff(self):
         from quantcheck.historical_resend import ResendValidationError, prepare_resend

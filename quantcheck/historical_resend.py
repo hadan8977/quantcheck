@@ -185,6 +185,16 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path("/opt/quantcheck"))
     parser.add_argument("--send", action="store_true", help="Send after all validation gates pass")
     parser.add_argument("--confirm-date", default="", help="Must exactly match --weekly-date when --send is used")
+    parser.add_argument(
+        "--recipient",
+        action="append",
+        default=None,
+        help=(
+            "Send only to this address instead of the full subscriber route (repeatable). "
+            "Meant for an admin preview send -- review the rendered mail for one real address "
+            "before a follow-up --send without --recipient goes to every subscriber."
+        ),
+    )
     args = parser.parse_args()
 
     plan = prepare_resend(args.root, args.weekly_date)
@@ -194,9 +204,14 @@ def main() -> None:
         return
 
     load_env(args.root)
-    recipients = subscriber_recipients(dict(os.environ))
+    if args.recipient:
+        recipients = args.recipient
+        recipients_source = "explicit_recipient"
+    else:
+        recipients = subscriber_recipients(dict(os.environ))
+        recipients_source = "subscriber_route"
     delivered, failed = execute_resend(plan, recipients, args.confirm_date)
-    summary.update({"mode": "sent", "delivered": len(delivered), "failed": failed})
+    summary.update({"mode": "sent", "recipients_source": recipients_source, "delivered": len(delivered), "failed": failed})
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
