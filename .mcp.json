@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "quantcheck": {
+      "command": "/opt/quantcheck/.venv/bin/quantcheck-mcp",
+      "args": [],
+      "env": {
+        "QUANTCHECK_HOME": "/opt/quantcheck"
+      }
+    }
+  }
+}

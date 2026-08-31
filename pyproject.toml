@@ -18,6 +18,7 @@ dependencies = [
   "google-api-python-client>=2.0.0",
   "google-auth>=2.0.0",
   "google-auth-oauthlib>=1.0.0",
+  "mcp>=2.1.1",
 ]
 
 [project.scripts]
@@ -27,6 +28,8 @@ quantcheck-report = "quantcheck.picks_report:main"
 quantcheck-health = "quantcheck.health_watchdog:main"
 quantcheck-official-mail = "quantcheck.official_mail_forwarder:main"
 quantcheck-recipients = "quantcheck.recipients:main"
+quantcheck-admin = "quantcheck.admin_cli:main"
+quantcheck-mcp = "quantcheck.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["quantcheck*"]
