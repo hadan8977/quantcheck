@@ -262,6 +262,22 @@ def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
                 end = min(end, match.end() + next_match.start())
         return clean_text(clean[match.end():end])
 
+    def first_token_after(label: str) -> str:
+        # Used only to detect an "unavailable" placeholder (-, N/A, ...)
+        # right after a label. When Momentum/Relative Strength have no data,
+        # Quant GT renders no label text for them at all (not even a "-"),
+        # so value_after's boundary search skips past them and can swallow
+        # an entire company-description paragraph up to the next label that
+        # *does* appear (e.g. "More Headlines") instead of stopping at a
+        # lone "-". Reading only the first whitespace-delimited token right
+        # after the label sidesteps that instead of widening the boundary
+        # search.
+        match = re.search(re.escape(label) + r"\s*:?\s*", clean, re.I)
+        if not match:
+            return ""
+        remainder = clean[match.end():].strip()
+        return remainder.split(" ", 1)[0] if remainder else ""
+
     entry = re.search(rf"\b{re.escape(symbol)}\s*:\s*(\$[0-9.,]+)", clean, re.I)
     momentum = value_after("Momentum", ["Relative Strength"])
     relative_strength = value_after("Relative Strength", ["Headlines", "More Headlines", "Close"])
@@ -271,9 +287,16 @@ def parse_watchlist_dialog_text(text: str, symbol: str) -> Dict[str, str]:
         or value_after("Analyst Consensus", labels[7:])
     )
     unavailable_values = {"—", "–", "-", "N/A", "NA"}
-    next_earnings_unavailable = next_earnings_raw.upper() in unavailable_values
-    analyst_signal_unavailable = analyst_signal_raw.upper() in unavailable_values
-    analyst_signal = parse_analyst_signal_text(analyst_signal_raw)
+    next_earnings_unavailable = (
+        next_earnings_raw.upper() in unavailable_values
+        or first_token_after("Next Earnings").upper() in unavailable_values
+    )
+    analyst_signal_unavailable = (
+        analyst_signal_raw.upper() in unavailable_values
+        or first_token_after("Analyst Signal").upper() in unavailable_values
+        or first_token_after("Analyst Consensus").upper() in unavailable_values
+    )
+    analyst_signal = "" if analyst_signal_unavailable else parse_analyst_signal_text(analyst_signal_raw)
     momentum_match = re.search(r"([0-9.]+)\s*/\s*2", momentum)
     strength_match = re.search(r"([0-9.]+)\s*/\s*3", relative_strength)
     if momentum_match:

@@ -79,6 +79,17 @@ ModuleNotFoundError: No module named 'pandas_market_calendars'
 
 **举一反三**：任何页面改版把某一列表头换了个新名字，只要新名字没进 `HEADER_ALIASES`，都会重演这个模式——先查新表头文本，`normalize_header()` 一下，看结果在不在 `HEADER_ALIASES` 里。
 
+### 3.5 Watchlist 详情弹窗里「合法缺失」字段被公司简介吞掉
+
+- **症状**：`incomplete detail rows: <SYMBOL> missing analyst_signal`，连续多天同一个股票报同一个错，其它股票都正常。
+- **根因**：`parse_watchlist_dialog_text`（`scrape_parse.py`）用 `value_after(label, next_labels)` 按「找下一个已知标签出现的位置」来截断字段值。正常情况下 "Analyst Consensus" 后面紧跟 "Momentum"，边界很紧。但如果这只股票的 Momentum/Relative Strength **完全没有数据**，Quant GT 连标签本身都不渲染（不是显示"—"，是整个区块消失）——这时 `value_after` 找不到 "Momentum"/"Relative Strength"，只能继续找下一个存在的标签，很可能是隔着一整段公司简介之后的 "More Headlines"，于是把整段简介误当成 `analyst_signal` 的原始值。后果是「合法缺失」检测（`analyst_signal_raw.upper() in unavailable_values`）失效——因为被检测的不再是干净的 `"—"`，而是一大段文字，永远不会精确等于 `"—"`。
+- **修法**：加了 `first_token_after(label)`，只取标签后面第一个空格分隔的 token（不做多标签边界搜索），专门用来判断这个字段是不是「合法缺失」；原本的 `value_after` 继续用来提取真实存在的值（如 "Buy +0.24"），两者并行、互不影响。
+- **诊断手法**：不要只看 validation 报错字符串，要活体抓一次真实的 dialog 原始文本（`dialog.inner_text()`），肉眼确认到底是文本里根本没有这个字段，还是提取边界算错了。本次是后者。
+- **对应测试**：`tests/test_scrape_parse.py::test_watchlist_dialog_unavailable_analyst_consensus_not_swallowed_by_company_blurb`（用真实抓到的 APGE 文本做的 fixture）。
+- **commit**：`_(见 git log，2026-09-08 修复)_`
+
+**举一反三**：任何「某字段值缺失时连标签本身都不渲染」的场景，都可能让 `value_after` 式的边界搜索越界吞掉后面一大段无关内容。判断「合法缺失」时优先用窄范围的 `first_token_after` 式检测，不要依赖宽范围提取的返回值恰好等于某个哨兵字符串。
+
 ---
 
 ## 第四步：两个容易复发的代码陷阱
@@ -115,6 +126,7 @@ ModuleNotFoundError: No module named 'pandas_market_calendars'
    ```bash
    ls -lt state/raw/picks_raw_*.json | tac   # 按时间正序看，找断档的位置
    ```
+   **一个真实踩到的坑**：`run_baseline()`（`picks_check.py`）——也就是第二步诊断命令序列里用来验证修复的那条 `--mode baseline` 命令——**只写 `state/latest_picks.json`，不写 `state/raw/` 快照**。如果修复后是靠这条命令验证的，`state/raw/` 里"故障后第一个成功快照"这个文件根本不存在，下面第2步找不到端点。2026-09-08 这次的应对：`state/previous_picks.json`（故障前）和 `state/latest_picks.json`（跑完 baseline 后，故障修复后的当前状态）这对文件本身就是现成的端点——**前提是这期间只跑过一次 `--mode baseline`**（多跑会互相覆盖，参考第五步第2条）。这种情况下不必强求 `historical_resend.py` 能找到端点，可以：①备份当前 `state/latest_picks.json`；②把 `state/previous_picks.json` 的内容拷贝覆盖到 `state/latest_picks.json`（相当于把"latest"临时倒回故障前状态）；③跑一次 `quantcheck-admin ops run picks --force --confirm`（或等价的 `python -m quantcheck.picks_check --mode check --force`）——它会用当前真实的活体数据和刚刚"倒回去"的旧数据做 diff，检测到真实变化后自动走标准的 raw快照+Excel+截图+发信全流程，等价于把这次的 backfill 当成一次迟到的正常检查来处理，而不是用 `historical_resend.py` 重建。这条路径用的是系统里被验证最多的标准发信路径本身，不是新写的临时脚本。
 2. **用这两个端点做 diff——不是随手挑相邻两个文件比**，因为中间那些天可能完全没有成功快照。用 `quantcheck/historical_resend.py` 重建 diff，先不带 `--send` 跑一次，只打印 JSON 预览，不发送任何邮件：
    ```bash
    .venv/bin/python3 -m quantcheck.historical_resend --weekly-date "<故障后第一个快照的 weekly.pick_date>"

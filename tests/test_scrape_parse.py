@@ -187,6 +187,35 @@ class ScrapeParseTests(unittest.TestCase):
         self.assertEqual(details["analyst_signal"], "")
         self.assertTrue(details["analyst_signal_unavailable"])
 
+    def test_watchlist_dialog_unavailable_analyst_consensus_not_swallowed_by_company_blurb(self):
+        # Regression (2026-09-08, APGE): when Momentum/Relative Strength have
+        # no data, Quant GT renders no label text for them at all -- not even
+        # a "-". value_after's boundary search for "Analyst Consensus" then
+        # has no nearby label to stop at and runs all the way to "More
+        # Headlines", swallowing the entire company-description paragraph in
+        # between into what should have been a lone "-". That made
+        # analyst_signal_unavailable False (it was checking whether the
+        # *whole swallowed blob* equals "-"), which made this stock look
+        # like a genuine scrape failure ("missing analyst_signal") every run
+        # for days, instead of a legitimately-unavailable field.
+        text = (
+            "APGE Health Technology Apogee Therapeutics, Inc. PRICE $135.07 — "
+            "1M 6M 1Y YTD P/E (TTM) — Market Cap $10.22B Revenue (TTM) — "
+            "Revenue Growth (YoY) — Next Earnings — Analyst Consensus — "
+            "Apogee Therapeutics, Inc. develops and commercializes biologic "
+            "therapies for immunological and inflammatory (I&I) diseases for "
+            "patients and caregivers. The company's pipeline includes "
+            "products, such as ZUMILOKIBART (APG777), a monoclonal antibody "
+            "for atopic dermatitis, asthma, and eosinophilic… More Headlines Close"
+        )
+
+        details = parse_watchlist_dialog_text(text, "APGE")
+
+        self.assertEqual(details["analyst_signal"], "")
+        self.assertTrue(details["analyst_signal_unavailable"])
+        self.assertEqual(details["next_earnings"], "")
+        self.assertTrue(details["next_earnings_unavailable"])
+
     def test_merge_watchlist_api_scores_uses_native_score(self):
         rows = [{"symbol": "SNDK"}, {"symbol": "MXL"}]
         api_rows = [
