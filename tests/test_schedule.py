@@ -1,6 +1,6 @@
 import os
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
@@ -144,6 +144,27 @@ class ScheduleTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIn("quantcheck.official_mail_forwarder", calls[0][0])
+
+    def test_month_end_official_mail_does_not_swallow_colliding_picks(self):
+        # Regression: 2026-09-29/30 the 15-minute month-end official_mail grid
+        # landed on 08:30/09:00/17:00 and the scheduler only ran official_mail.
+        import quantcheck.scheduler as scheduler
+
+        ny = ZoneInfo("America/New_York")
+        for hour, minute in [(8, 30), (9, 0), (17, 0)]:
+            now = datetime(2026, 9, 29, hour, minute, tzinfo=ny) - timedelta(minutes=1)
+            _, target, kinds = scheduler.next_due_jobs(None, now=now)
+            self.assertEqual((target.hour, target.minute), (hour, minute))
+            self.assertEqual(kinds, ["picks", "official_mail"])
+
+    def test_non_trading_month_end_noon_runs_picks_and_official_mail(self):
+        import quantcheck.scheduler as scheduler
+
+        ny = ZoneInfo("America/New_York")
+        # 2026-05-30 is a Saturday and month-end.
+        _, target, kinds = scheduler.next_due_jobs(None, now=datetime(2026, 5, 30, 11, 59, tzinfo=ny))
+        self.assertEqual((target.hour, target.minute), (12, 0))
+        self.assertEqual(kinds, ["picks", "official_mail"])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from quantcheck.membership import MEMBERSHIP_TZ
 from quantcheck.membership_store import Member, MembershipStore, save_store
@@ -102,7 +103,9 @@ class ListAndGetMembersTests(ServiceMembersTestCase):
 class AddMemberTests(ServiceMembersTestCase):
     def test_add_member_computes_expiry_and_creates_store(self):
         self.write_subscribers()
-        result = svc.add_member("new@example.com", 1, note="test add", joined_at="2026-08-10", root=self.root)
+        # Pin "now" so the 2026-09-09 expiry is still in the future.
+        with patch.object(svc, "_now", return_value=ny(2026, 8, 10)):
+            result = svc.add_member("new@example.com", 1, note="test add", joined_at="2026-08-10", root=self.root)
 
         self.assertEqual(result["member"]["email"], "new@example.com")
         self.assertEqual(result["member"]["expires_at"], ny(2026, 9, 9).isoformat())

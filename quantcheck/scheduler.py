@@ -33,8 +33,13 @@ def load_env():
     load_dotenv(ROOT)
 
 
-def seconds_until_next(raw_schedule: str | None = None):
-    now = datetime.now(NY)
+# When several jobs share a slot (e.g. month-end official_mail every 15 min
+# lands on 08:30/09:00/17:00 picks), all of them run, in this order.
+JOB_PRIORITY = ("picks", "health_site", "health", "daily_admin_status", "official_mail")
+
+
+def next_due_jobs(raw_schedule: str | None = None, now: datetime | None = None):
+    now = now or datetime.now(NY)
     candidates = []
     # Resolve dynamic default schedule separately for each candidate date so
     # a long-running daemon switches correctly between trading days and
@@ -55,8 +60,14 @@ def seconds_until_next(raw_schedule: str | None = None):
         h, m, kind = schedule[0]
         target = datetime.combine(tomorrow, datetime.min.time(), tzinfo=NY).replace(hour=h, minute=m, second=0, microsecond=0)
         candidates.append((target, kind))
-    target, kind = min(candidates, key=lambda x: x[0])
-    return max(1, int((target - now).total_seconds())), target, kind
+    target = min(t for t, _ in candidates)
+    kinds = sorted({k for t, k in candidates if t == target}, key=lambda k: (JOB_PRIORITY.index(k) if k in JOB_PRIORITY else len(JOB_PRIORITY), k))
+    return max(1, int((target - now).total_seconds())), target, kinds
+
+
+def seconds_until_next(raw_schedule: str | None = None):
+    sleep_s, target, kinds = next_due_jobs(raw_schedule)
+    return sleep_s, target, kinds[0]
 
 
 def run_cmd(args: list[str], timeout: int | None, *, capture_output: bool = False) -> int | tuple[int, str]:
@@ -186,14 +197,17 @@ def daemon():
     signal.signal(signal.SIGINT, handler)
     log("scheduler started")
     while not stop:
-        sleep_s, target, kind = seconds_until_next(raw_schedule)
-        log(f"next {kind} at {target.isoformat()} in {sleep_s}s")
+        sleep_s, target, kinds = next_due_jobs(raw_schedule)
+        log(f"next {'+'.join(kinds)} at {target.isoformat()} in {sleep_s}s")
         end = time.time() + sleep_s
         while not stop and time.time() < end:
             time.sleep(min(30, end - time.time()))
         if stop:
             break
-        run_once(kind)
+        for kind in kinds:
+            if stop:
+                break
+            run_once(kind)
     log("scheduler stopped")
 
 

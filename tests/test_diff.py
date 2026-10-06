@@ -91,6 +91,33 @@ class DiffTests(unittest.TestCase):
         new["weekly"]["rows"][0]["analyst_signal"] = "Buy +0.29"
 
         self.assertFalse(compare(old, new)["changed"])
+
+    def test_analyst_signal_threshold(self):
+        def changed(a, b):
+            old = sample_picks()
+            new = copy.deepcopy(old)
+            old["weekly"]["rows"][0]["analyst_signal"] = a
+            new["weekly"]["rows"][0]["analyst_signal"] = b
+            return compare(old, new)["changed"]
+
+        # Daily oscillation seen in production (2026-09-22/23): no email.
+        self.assertFalse(changed("Buy +0.38", "Strong Buy +0.56"))
+        self.assertFalse(changed("Strong Buy +0.56", "Buy +0.31"))
+        self.assertFalse(changed("Sell -0.16", "Buy +0.38"))
+        # Large swings and Strong Sell entry/exit still notify.
+        self.assertTrue(changed("Sell -0.22", "Strong Buy +0.51"))
+        self.assertTrue(changed("Sell -0.29", "Strong Sell -0.52"))
+        self.assertTrue(changed("Strong Sell -0.52", "Sell -0.40"))
+
+    def test_availability_flags_alone_do_not_trigger(self):
+        old = sample_picks()
+        new = copy.deepcopy(old)
+        old["weekly"]["rows"][0]["analyst_signal_unavailable"] = True
+        new["weekly"]["rows"][0]["analyst_signal_unavailable"] = False
+        old["weekly"]["rows"][0]["next_earnings_unavailable"] = True
+        new["weekly"]["rows"][0]["next_earnings_unavailable"] = False
+        self.assertFalse(compare(old, new)["changed"])
+
     def test_same_changed_payload_is_not_notified_twice(self):
         old = sample_picks()
         new = copy.deepcopy(old)

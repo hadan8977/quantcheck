@@ -17,11 +17,19 @@ DYNAMIC_NOISE_FIELDS = {
     "next_earnings",
     "momentum",
     "relative_strength",
+    # Scrape-metadata flags: they flip when Quant GT omits/restores a field,
+    # which is data availability, not a pick change subscribers care about.
+    "analyst_signal_unavailable",
+    "next_earnings_unavailable",
+    "gt_score_source",
 }
 
-ANALYST_SIGNAL_MAJOR_DELTA = 0.30
-ANALYST_SIGNAL_CATEGORY_DELTA = 0.25
-ANALYST_SIGNAL_STRONG_DELTA = 0.15
+# Quant GT's analyst score is very jumpy: in 2026-06..09 snapshots the median
+# day-over-day move was 0.14, p90 0.41, and >half of moves reverted within ~2
+# trading days (e.g. HPE +0.38 -> +0.56 -> +0.31). The old 0.30 / label-change
+# rules fired ~3.5 signal-only emails a week; 0.60 plus Strong Sell entry/exit
+# replays to ~1 a week.
+ANALYST_SIGNAL_MAJOR_DELTA = 0.60
 
 
 def row_key(row: Dict[str, Any]) -> str:
@@ -44,17 +52,11 @@ def is_major_analyst_signal_change(old_value: Any, new_value: Any) -> bool:
     new_label, new_score = parse_analyst_signal(new_value)
     if str(old_value or "") == str(new_value or ""):
         return False
+    if (old_label == "Strong Sell") != (new_label == "Strong Sell"):
+        return True
     if old_score is None or new_score is None:
-        return old_label != new_label and {"Strong Buy", "Strong Sell"} & {old_label, new_label}
-    delta = abs(new_score - old_score)
-    if delta >= ANALYST_SIGNAL_MAJOR_DELTA:
-        return True
-    label_changed = old_label != new_label
-    if label_changed and delta >= ANALYST_SIGNAL_CATEGORY_DELTA:
-        return True
-    if label_changed and ({old_label, new_label} & {"Strong Buy", "Strong Sell"}) and delta >= ANALYST_SIGNAL_STRONG_DELTA:
-        return True
-    return False
+        return False
+    return abs(new_score - old_score) >= ANALYST_SIGNAL_MAJOR_DELTA
 
 
 def diff_rows(old_rows: List[Dict[str, Any]], new_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
