@@ -382,5 +382,33 @@ class HistoricalResendPreviewTests(ServiceOpsTestCase):
         self.assertFalse(hasattr(svc_ops, "execute_resend"))
 
 
+
+class StatusNextJobsTests(ServiceOpsTestCase):
+    def test_next_jobs_lists_every_job_sharing_the_slot_in_run_order(self):
+        from zoneinfo import ZoneInfo
+
+        target = datetime(2026, 10, 8, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+        with patch("quantcheck.service.ops.scheduler_mod.next_due_jobs", return_value=(600, target, ["picks", "official_mail"])):
+            result = svc_ops.status(root=self.root)
+        self.assertEqual([job["kind"] for job in result["next_jobs"]], ["picks", "official_mail"])
+        self.assertTrue(all(job["at"] == target.isoformat() and job["in_seconds"] == 600 for job in result["next_jobs"]))
+        self.assertEqual(result["next_job"], {"kind": "picks", "at": target.isoformat(), "in_seconds": 600})  # backward compatible
+        json.dumps(result)
+
+    def test_real_scheduler_colliding_slot(self):
+        # A custom schedule with two kinds at the same minute exercises the
+        # real scheduler.next_due_jobs (no patching) through status().
+        (self.root / ".env").write_text(f"QUANTCHECK_HOME={self.root}\nQUANTCHECK_SCHEDULE=23:59:official_mail,23:59:picks\n", encoding="utf-8")
+        result = svc_ops.status(root=self.root)
+        self.assertEqual([job["kind"] for job in result["next_jobs"]], ["picks", "official_mail"])
+        self.assertEqual(result["next_job"]["kind"], "picks")
+
+    def test_scheduler_failure_keeps_status_alive(self):
+        with patch("quantcheck.service.ops.scheduler_mod.next_due_jobs", side_effect=RuntimeError("boom")):
+            result = svc_ops.status(root=self.root)
+        self.assertIn("error", result["next_job"])
+        self.assertEqual(result["next_jobs"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

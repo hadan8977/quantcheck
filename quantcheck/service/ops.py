@@ -198,9 +198,13 @@ def status(*, root: Path | str | None = None) -> dict[str, Any]:
     lock_path = _lock_path(resolved_root)
 
     raw_schedule = env.get("QUANTCHECK_SCHEDULE") or None
+    next_jobs: list[dict[str, Any]] = []
     try:
-        seconds, target, kind = scheduler_mod.seconds_until_next(raw_schedule)
-        next_job: dict[str, Any] = {"kind": kind, "at": target.isoformat(), "in_seconds": seconds}
+        # Several jobs can share one time slot; next_due_jobs returns all of
+        # them in the order the daemon runs them (picks first).
+        seconds, target, kinds = scheduler_mod.next_due_jobs(raw_schedule)
+        next_jobs = [{"kind": kind, "at": target.isoformat(), "in_seconds": seconds} for kind in kinds]
+        next_job: dict[str, Any] = next_jobs[0]  # backward compatible: the first job of the slot
     except Exception as exc:  # defensive: status() must never itself crash
         next_job = {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -220,6 +224,7 @@ def status(*, root: Path | str | None = None) -> dict[str, Any]:
         },
         "official_mail_state": official_mail_state or {},
         "next_job": next_job,
+        "next_jobs": next_jobs,
     }
 
 
