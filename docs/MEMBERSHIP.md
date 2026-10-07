@@ -178,6 +178,8 @@ from the start):
 quantcheck-admin members list [--status active] [--expiring-days 14]
 quantcheck-admin members get EMAIL
 quantcheck-admin members add EMAIL --months 1 [--note "..."] [--joined-at 2026-08-10]
+quantcheck-admin members add EMAIL --expires-at 2026-11-01   # explicit expiry
+quantcheck-admin members add EMAIL --align                    # same expiry as most active members
 quantcheck-admin members extend EMAIL --months 3
 quantcheck-admin members set-expiry EMAIL --date 2026-12-09 [--note "..."]
 quantcheck-admin members set-expiry EMAIL --date null   # never expires (legacy)
@@ -199,6 +201,66 @@ Two intentional asymmetries worth knowing about:
   (paying again is an unambiguous signal they should receive mail again).
 - `set_expiry` never touches `status`, even on a cancelled member -- it is a
   pure date-correction tool. Use `extend_member` to reinstate someone.
+
+### Adding a member with a given expiry (`--expires-at` / `--align`)
+
+`add --months N` is anchor arithmetic: the first month ends at the *next*
+9th, so adding someone on 2026-10-07 with `--months 1` yields a two-day
+membership (expiry 2026-10-09). To put a new member on the same expiry as
+everyone else, say so directly instead of adding and then correcting:
+
+```bash
+quantcheck-admin members add EMAIL --expires-at 2026-11-01
+quantcheck-admin members add EMAIL --align     # most common expiry among active members
+```
+
+Exactly one of `--months`, `--expires-at`, `--align` is required. `--align`
+uses the most common `expires_at` among currently-active members (ties go to
+the later date) and fails with `no_active_members` when there are none. These
+two modes leave `months_total` at `0` and write a history entry with
+`"months": null`, `"expires_at": ...` and `"mode": "expires_at"` / `"align"`
+(`"mode": "months"` for the classic path).
+
+### Bulk operations
+
+```bash
+quantcheck-admin members bulk-add --file new.txt --align [--note "..."]            # dry-run
+quantcheck-admin members bulk-add --file new.txt --align --apply                    # write
+quantcheck-admin members bulk-extend a@x.com b@x.com --months 1 --apply
+quantcheck-admin members bulk-extend --all-active --months 1                        # dry-run
+quantcheck-admin members bulk-set-expiry --all-active --expires-at 2026-12-01 --apply
+```
+
+All bulk commands (CLI) and tools (`bulk_add_members`, `bulk_extend_members`,
+`bulk_set_expiry`, MCP) default to **dry-run**; nothing is written until
+`--apply` / `dry_run=false`. Input may be a messy paste (whitespace, commas,
+semicolons, newlines; `#` starts a comment). Invalid addresses, existing
+members (bulk-add) and unknown emails (bulk-extend / bulk-set-expiry) are
+listed per email and skipped. An apply saves `memberships.json` once and
+writes `notify_recipients.txt` at most once (via the same `recipients.py`
+helpers). `--all-active` means currently-active only: legacy
+(`expires_at: null`), expired and cancelled members are not touched.
+
+### Payments
+
+Payments are recorded inside history entries (`"payment": {"amount",
+"currency", "channel", "paid_at", "ref"}`); there are no new top-level store
+fields, so a `memberships.json` written by older code still loads, and
+filtering in `notify_routes` (fail-open included) never looks at them.
+
+```bash
+quantcheck-admin members add EMAIL --align --amount 30 --currency CNY --channel wechat --ref ORDER123
+quantcheck-admin members extend EMAIL --months 1 --amount 30 --currency CNY --channel alipay
+quantcheck-admin members record-payment EMAIL --amount 30 --currency CNY --channel wechat --paid-at 2026-10-05
+quantcheck-admin members payments --since 2026-10-01 --until 2026-10-31
+```
+
+`record-payment` only records money received; it does not change expiry,
+status, `months_total` or the mail list (use `extend` to also grant time).
+`members get` adds derived `payments` and `total_paid` (currency -> sum;
+payments with no currency are summed under `"unspecified"`), and `members
+payments` totals by currency and by channel. `--amount` on `bulk-add` is per
+member.
 
 See `docs/AGENT_API.md` for the full CLI/MCP reference, and
 `docs/OPERATIONS.md` for how this fits into the rest of day-to-day
