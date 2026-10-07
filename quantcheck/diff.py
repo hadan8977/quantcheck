@@ -22,6 +22,9 @@ DYNAMIC_NOISE_FIELDS = {
     "analyst_signal_unavailable",
     "next_earnings_unavailable",
     "gt_score_source",
+    # Which page layout a row was parsed from (table vs watchlist card); flipped
+    # on every weekly row on 2026-07-02 and produced a meaningless alert.
+    "source_kind",
 }
 
 # Quant GT's analyst score is very jumpy: in 2026-06..09 snapshots the median

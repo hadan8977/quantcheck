@@ -69,6 +69,14 @@ class DiffTests(unittest.TestCase):
 
         self.assertFalse(compare(old, new)["changed"])
 
+    def test_source_kind_layout_metadata_does_not_trigger_notification(self):
+        old = sample_picks()
+        new = copy.deepcopy(old)
+        old["weekly"]["rows"][0]["source_kind"] = ""
+        new["weekly"]["rows"][0]["source_kind"] = "watchlist"
+
+        self.assertFalse(compare(old, new)["changed"])
+
     def test_analyst_signal_score_is_parsed_from_suffix(self):
         self.assertEqual(parse_analyst_signal("Strong Buy +0.27"), ("Strong Buy", 0.27))
 
