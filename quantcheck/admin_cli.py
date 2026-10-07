@@ -40,7 +40,7 @@ def _human_scalar(value: Any) -> str:
     return str(value)
 
 
-_TABLE_KEYS = ("members", "deliveries", "findings", "expiring", "jobs")
+_TABLE_KEYS = ("members", "deliveries", "findings", "expiring", "jobs", "results", "payments")
 
 
 def _human_lines(data: Any, indent: int = 0) -> list[str]:
@@ -99,12 +99,74 @@ def _cmd_members_get(args: argparse.Namespace, root: Path) -> dict:
     return members_svc.get_member(args.email, root=root)
 
 
+def _payment_from_args(args: argparse.Namespace) -> dict | None:
+    """Flat --amount/--currency/... flags -> payment dict (None if none given).
+    Validation (e.g. amount required once any payment flag is used) is the service's job.
+    """
+    return members_svc.build_payment(args.amount, args.currency, args.channel, args.paid_at, args.ref)
+
+
 def _cmd_members_add(args: argparse.Namespace, root: Path) -> dict:
-    return members_svc.add_member(args.email, args.months, note=args.note, joined_at=args.joined_at, root=root)
+    return members_svc.add_member(
+        args.email,
+        args.months,
+        note=args.note,
+        joined_at=args.joined_at,
+        expires_at=args.expires_at,
+        align=args.align,
+        payment=_payment_from_args(args),
+        root=root,
+    )
 
 
 def _cmd_members_extend(args: argparse.Namespace, root: Path) -> dict:
-    return members_svc.extend_member(args.email, args.months, note=args.note, root=root)
+    return members_svc.extend_member(args.email, args.months, note=args.note, payment=_payment_from_args(args), root=root)
+
+
+def _read_email_inputs(args: argparse.Namespace) -> str | None:
+    """Positional emails and/or --file PATH (`-` = stdin), joined into one pasteable blob."""
+    parts: list[str] = list(args.emails or [])
+    if args.file is not None:
+        try:
+            parts.append(sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ServiceError("file_unreadable", f"cannot read {args.file}: {exc}", {"path": args.file}) from exc
+    return "\n".join(parts) if parts else None
+
+
+def _cmd_members_bulk_add(args: argparse.Namespace, root: Path) -> dict:
+    return members_svc.bulk_add(
+        _read_email_inputs(args),
+        months=args.months,
+        expires_at=args.expires_at,
+        align=args.align,
+        note=args.note,
+        payment=_payment_from_args(args),
+        dry_run=not args.apply,
+        root=root,
+    )
+
+
+def _cmd_members_bulk_extend(args: argparse.Namespace, root: Path) -> dict:
+    return members_svc.bulk_extend(
+        _read_email_inputs(args), months=args.months, all_active=args.all_active, note=args.note, dry_run=not args.apply, root=root
+    )
+
+
+def _cmd_members_bulk_set_expiry(args: argparse.Namespace, root: Path) -> dict:
+    return members_svc.bulk_set_expiry(
+        _read_email_inputs(args), expires_at=args.expires_at, all_active=args.all_active, note=args.note, dry_run=not args.apply, root=root
+    )
+
+
+def _cmd_members_record_payment(args: argparse.Namespace, root: Path) -> dict:
+    return members_svc.record_payment(
+        args.email, args.amount, currency=args.currency, channel=args.channel, paid_at=args.paid_at, ref=args.ref, note=args.note, root=root
+    )
+
+
+def _cmd_members_payments(args: argparse.Namespace, root: Path) -> dict:
+    return members_svc.payments_report(since=args.since, until=args.until, root=root)
 
 
 def _cmd_members_set_expiry(args: argparse.Namespace, root: Path) -> dict:
@@ -163,6 +225,29 @@ def _cmd_ops_resend_preview(args: argparse.Namespace, root: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _add_expiry_mode_args(p: argparse.ArgumentParser) -> None:
+    # Not argparse-required: "exactly one of" is validated in the service layer so CLI and MCP agree.
+    p.add_argument("--months", type=int, default=None, help="Months from the next 9th anchor.")
+    p.add_argument("--expires-at", default=None, dest="expires_at", help="Explicit expiry, YYYY-MM-DD or ISO datetime.")
+    p.add_argument("--align", action="store_true", help="Use the most common expiry among currently-active members.")
+
+
+def _add_payment_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--amount", default=None, help="Payment amount; required if any other payment flag is given.")
+    p.add_argument("--currency", default=None)
+    p.add_argument("--channel", default=None, help="e.g. wechat, alipay.")
+    p.add_argument("--paid-at", default=None, dest="paid_at", help="YYYY-MM-DD or ISO datetime; defaults to now.")
+    p.add_argument("--ref", default=None)
+
+
+def _add_bulk_input_args(p: argparse.ArgumentParser, *, all_active: bool = False) -> None:
+    p.add_argument("emails", nargs="*", help="Emails (whitespace/comma/semicolon separated; '#' starts a comment).")
+    p.add_argument("--file", default=None, help="Read emails from PATH ('-' = stdin).")
+    if all_active:
+        p.add_argument("--all-active", action="store_true", dest="all_active", help="Target every currently-active member instead of listing emails.")
+    p.add_argument("--apply", action="store_true", help="Actually write. Without it the command only previews (dry-run).")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quantcheck-admin", description="JSON-first admin CLI for quantcheck membership and operations.")
     parser.add_argument("--root", type=Path, default=None, help="Quantcheck root directory. Defaults to QUANTCHECK_HOME or the project root.")
@@ -183,15 +268,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = members_sub.add_parser("add", help="Create a new member and add them to notify_recipients.txt.")
     p.add_argument("email")
-    p.add_argument("--months", type=int, required=True)
+    _add_expiry_mode_args(p)
     p.add_argument("--note", default=None)
     p.add_argument("--joined-at", default=None, dest="joined_at", help="YYYY-MM-DD or ISO datetime; defaults to now.")
+    _add_payment_args(p)
     p.set_defaults(func=_cmd_members_add)
 
     p = members_sub.add_parser("extend", help="Add months to an existing member's expiry.")
     p.add_argument("email")
     p.add_argument("--months", type=int, required=True)
     p.add_argument("--note", default=None)
+    _add_payment_args(p)
     p.set_defaults(func=_cmd_members_extend)
 
     p = members_sub.add_parser("set-expiry", help="Manually correct a member's expiry date (does not change status).")
@@ -204,6 +291,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("email")
     p.add_argument("--reason", required=True)
     p.set_defaults(func=_cmd_members_remove)
+
+    p = members_sub.add_parser("bulk-add", help="Add many new members at once. DRY-RUN unless --apply.")
+    _add_bulk_input_args(p)
+    _add_expiry_mode_args(p)
+    p.add_argument("--note", default=None)
+    _add_payment_args(p)
+    p.set_defaults(func=_cmd_members_bulk_add)
+
+    p = members_sub.add_parser("bulk-extend", help="Extend many members by N months. DRY-RUN unless --apply.")
+    _add_bulk_input_args(p, all_active=True)
+    p.add_argument("--months", type=int, required=True)
+    p.add_argument("--note", default=None)
+    p.set_defaults(func=_cmd_members_bulk_extend)
+
+    p = members_sub.add_parser("bulk-set-expiry", help="Set the same expiry on many members. DRY-RUN unless --apply.")
+    _add_bulk_input_args(p, all_active=True)
+    p.add_argument("--expires-at", "--date", dest="expires_at", required=True, help="YYYY-MM-DD or ISO datetime.")
+    p.add_argument("--note", default=None)
+    p.set_defaults(func=_cmd_members_bulk_set_expiry)
+
+    p = members_sub.add_parser("record-payment", help="Record a payment without changing expiry or status.")
+    p.add_argument("email")
+    p.add_argument("--amount", required=True)
+    p.add_argument("--currency", default=None)
+    p.add_argument("--channel", default=None, help="e.g. wechat, alipay.")
+    p.add_argument("--paid-at", default=None, dest="paid_at", help="YYYY-MM-DD or ISO datetime; defaults to now.")
+    p.add_argument("--ref", default=None)
+    p.add_argument("--note", default=None)
+    p.set_defaults(func=_cmd_members_record_payment)
+
+    p = members_sub.add_parser("payments", help="Payments report: totals by currency and channel, plus the list. Read-only.")
+    p.add_argument("--since", default=None, help="YYYY-MM-DD or ISO datetime (inclusive, by paid_at).")
+    p.add_argument("--until", default=None, help="YYYY-MM-DD (whole day included) or ISO datetime.")
+    p.set_defaults(func=_cmd_members_payments)
 
     p = members_sub.add_parser("migrate", help="One-time bulk migration from notify_recipients.txt. Idempotent.")
     p.add_argument("--expires", required=True, help="YYYY-MM-DD or ISO datetime; required (migration never creates never-expiring members).")

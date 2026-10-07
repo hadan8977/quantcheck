@@ -19,6 +19,11 @@ EXPECTED_TOOL_NAMES = {
     "expiring_report",
     "sync_recipients",
     "migrate_from_recipients",
+    "bulk_add_members",
+    "bulk_extend_members",
+    "bulk_set_expiry",
+    "record_payment",
+    "payments_report",
     "route_preview",
     "ops_status",
     "ops_run_job",
@@ -53,7 +58,7 @@ class ServerStartsAndListsToolsTests(unittest.TestCase):
 
     def test_required_fields_match_service_signatures(self):
         tools = {t.name: t for t in run_async(server.list_tools())}
-        self.assertEqual(set(tools["add_member"].input_schema["required"]), {"email", "months"})
+        self.assertEqual(set(tools["add_member"].input_schema["required"]), {"email"})
         self.assertEqual(set(tools["remove_member"].input_schema["required"]), {"email", "reason"})
         self.assertEqual(set(tools["migrate_from_recipients"].input_schema["required"]), {"expires_at"})
         # set_expiry's `note` has a default at the MCP layer even though the
@@ -195,6 +200,73 @@ class RoutePreviewToolTests(unittest.TestCase):
         self.assertTrue(result.is_error)
         payload = json.loads(result.content[0].text)
         self.assertEqual(payload["error"]["code"], "invalid_route")
+
+
+
+class BulkAndPaymentToolTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "state").mkdir(parents=True, exist_ok=True)
+        (self.root / ".env").write_text(f"QUANTCHECK_HOME={self.root}\n", encoding="utf-8")
+        (self.root / "notify_recipients.txt").write_text("", encoding="utf-8")
+        env_patch = patch.dict("os.environ", {"QUANTCHECK_HOME": str(self.root)})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def payload(self, result):
+        return json.loads(result.content[0].text)
+
+    def test_tool_schemas(self):
+        tools = {t.name: t for t in run_async(server.list_tools())}
+        self.assertEqual(set(tools["add_member"].input_schema["required"]), {"email"})
+        self.assertEqual(set(tools["extend_member"].input_schema["required"]), {"email", "months"})
+        self.assertEqual(set(tools["bulk_add_members"].input_schema["required"]), {"emails"})
+        self.assertEqual(set(tools["bulk_extend_members"].input_schema["required"]), {"months"})
+        self.assertEqual(set(tools["bulk_set_expiry"].input_schema["required"]), {"expires_at"})
+        self.assertEqual(set(tools["record_payment"].input_schema["required"]), {"email", "amount"})
+        for name in ("bulk_add_members", "bulk_extend_members", "bulk_set_expiry"):
+            self.assertIs(tools[name].input_schema["properties"]["dry_run"]["default"], True, name)
+
+    def test_instructions_mention_bulk_dry_run(self):
+        from quantcheck.mcp_server import INSTRUCTIONS
+
+        self.assertIn("bulk_add_members", INSTRUCTIONS)
+        self.assertIn("dry_run=false", INSTRUCTIONS)
+
+    def test_bulk_add_defaults_to_dry_run(self):
+        from quantcheck.mcp_server import bulk_add_members
+
+        payload = self.payload(bulk_add_members(emails="a@example.com b@example.com", expires_at="2026-11-01"))
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse((self.root / "state" / "memberships.json").exists())
+        self.assertEqual((self.root / "notify_recipients.txt").read_text(encoding="utf-8"), "")
+
+    def test_add_member_align_payment_and_bulk_apply(self):
+        from quantcheck.mcp_server import add_member, bulk_add_members, bulk_extend_members, bulk_set_expiry, get_member, payments_report, record_payment
+
+        first = add_member(email="a@example.com", expires_at="2099-01-09", amount=10, currency="CNY", channel="wechat")
+        self.assertFalse(first.is_error)
+        aligned = self.payload(add_member(email="b@example.com", align=True))
+        self.assertEqual(aligned["member"]["expires_at"], "2099-01-09T00:00:00-05:00")
+        bad = add_member(email="c@example.com")
+        self.assertTrue(bad.is_error)
+        self.assertEqual(self.payload(bad)["error"]["code"], "invalid_arguments")
+
+        applied = self.payload(bulk_add_members(emails=["c@example.com", "d@example.com"], align=True, dry_run=False))
+        self.assertEqual(applied["counts"]["ok"], 2)
+        ext = self.payload(bulk_extend_members(months=1, all_active=True))
+        self.assertTrue(ext["dry_run"])
+        self.assertEqual(ext["counts"]["ok"], 4)
+        sett = self.payload(bulk_set_expiry(expires_at="2099-03-09", emails="a@example.com", dry_run=False))
+        self.assertEqual(sett["counts"]["ok"], 1)
+
+        pay = self.payload(record_payment(email="a@example.com", amount=5.5, currency="CNY", channel="alipay"))
+        self.assertEqual(pay["member"]["total_paid"], {"CNY": 15.5})
+        self.assertEqual(self.payload(get_member(email="a@example.com"))["member"]["expires_at"], "2099-03-09T00:00:00-04:00")
+        report = self.payload(payments_report())
+        self.assertEqual((report["count"], report["totals_by_currency"]), (2, {"CNY": 15.5}))
 
 
 if __name__ == "__main__":

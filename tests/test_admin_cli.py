@@ -257,5 +257,127 @@ class ExistingEntryPointsUnaffectedTests(unittest.TestCase):
         self.assertTrue(expected.issubset(names), f"missing: {expected - names}")
 
 
+
+class AddExpiryModesAndPaymentFlagsTests(AdminCliTestCase):
+    def setUp(self):
+        super().setUp()
+        (self.root / "notify_recipients.txt").write_text("", encoding="utf-8")
+
+    def test_add_with_expires_at_and_payment_flags(self):
+        rc, data = self.run_cli_json(
+            "members", "add", "new@example.com", "--expires-at", "2026-11-01", "--amount", "99.5", "--currency", "CNY", "--channel", "wechat", "--ref", "T1"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["member"]["expires_at"], "2026-11-01T00:00:00-04:00")
+        entry = data["member"]["history"][-1]
+        self.assertEqual((entry["mode"], entry["months"]), ("expires_at", None))
+        self.assertEqual(entry["payment"]["amount"], 99.5)
+        self.assertEqual(entry["payment"]["channel"], "wechat")
+
+    def test_add_with_align(self):
+        self.run_cli("members", "add", "first@example.com", "--expires-at", "2099-01-09")
+        rc, data = self.run_cli_json("members", "add", "second@example.com", "--align")
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["member"]["expires_at"], "2099-01-09T00:00:00-05:00")
+
+    def test_add_requires_exactly_one_mode_via_service_error_not_argparse(self):
+        rc, data = self.run_cli_json("members", "add", "new@example.com")
+        self.assertEqual((rc, data["error"]["code"]), (2, "invalid_arguments"))
+        rc, data = self.run_cli_json("members", "add", "new@example.com", "--months", "1", "--align")
+        self.assertEqual((rc, data["error"]["code"]), (2, "invalid_arguments"))
+
+    def test_payment_flag_without_amount_is_rejected(self):
+        rc, data = self.run_cli_json("members", "add", "new@example.com", "--months", "1", "--currency", "CNY")
+        self.assertEqual((rc, data["error"]["code"]), (2, "invalid_payment"))
+
+    def test_extend_accepts_payment_flags(self):
+        self.run_cli("members", "add", "a@example.com", "--months", "1", "--joined-at", "2026-08-10")
+        rc, data = self.run_cli_json("members", "extend", "a@example.com", "--months", "1", "--amount", "10", "--currency", "usd")
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["member"]["history"][-1]["payment"]["currency"], "USD")
+
+
+class BulkCommandsTests(AdminCliTestCase):
+    def setUp(self):
+        super().setUp()
+        self.recipients = self.root / "notify_recipients.txt"
+        self.recipients.write_text("", encoding="utf-8")
+
+    def store_bytes(self):
+        path = self.root / "state" / "memberships.json"
+        return path.read_bytes() if path.exists() else None
+
+    def test_bulk_add_is_dry_run_by_default_and_apply_writes(self):
+        rc, data = self.run_cli_json("members", "bulk-add", "a@example.com", "b@example.com,bad", "--expires-at", "2026-11-01")
+        self.assertEqual(rc, 0)
+        self.assertTrue(data["dry_run"])
+        self.assertEqual(data["counts"]["ok"], 2)
+        self.assertEqual(data["counts"]["skipped_by_code"], {"invalid_email": 1})
+        self.assertIsNone(self.store_bytes())
+        self.assertEqual(self.recipients.read_text(encoding="utf-8"), "")
+
+        rc, data = self.run_cli_json("members", "bulk-add", "a@example.com", "b@example.com", "--expires-at", "2026-11-01", "--apply")
+        self.assertEqual((rc, data["dry_run"]), (0, False))
+        self.assertIn("a@example.com", self.recipients.read_text(encoding="utf-8"))
+        rc, data = self.run_cli_json("members", "get", "b@example.com")
+        self.assertEqual(data["member"]["expires_at"], "2026-11-01T00:00:00-04:00")
+
+    def test_bulk_add_from_file_and_stdin(self):
+        path = self.root / "list.txt"
+        path.write_text("# new batch\nf1@example.com; f2@example.com  # comment\n", encoding="utf-8")
+        rc, data = self.run_cli_json("members", "bulk-add", "--file", str(path), "--expires-at", "2026-11-01")
+        self.assertEqual((rc, [r["email"] for r in data["results"]]), (0, ["f1@example.com", "f2@example.com"]))
+        with patch("sys.stdin", io.StringIO("s1@example.com\ns2@example.com\n")):
+            rc, data = self.run_cli_json("members", "bulk-add", "--file", "-", "--expires-at", "2026-11-01")
+        self.assertEqual([r["email"] for r in data["results"]], ["s1@example.com", "s2@example.com"])
+
+    def test_missing_file_is_a_clean_error(self):
+        rc, data = self.run_cli_json("members", "bulk-add", "--file", str(self.root / "nope.txt"), "--expires-at", "2026-11-01")
+        self.assertEqual((rc, data["error"]["code"]), (2, "file_unreadable"))
+
+    def test_bulk_extend_and_set_expiry_dry_run_then_apply(self):
+        self.run_cli("members", "add", "a@example.com", "--expires-at", "2099-01-09")
+        self.run_cli("members", "add", "b@example.com", "--expires-at", "2099-01-09")
+        before = self.store_bytes()
+        rc, data = self.run_cli_json("members", "bulk-extend", "--all-active", "--months", "1")
+        self.assertEqual((rc, data["dry_run"], data["counts"]["ok"]), (0, True, 2))
+        self.assertEqual(self.store_bytes(), before)
+        rc, data = self.run_cli_json("members", "bulk-extend", "a@example.com", "ghost@example.com", "--months", "1", "--apply")
+        self.assertEqual(data["counts"]["skipped_by_code"], {"member_not_found": 1})
+        rc, data = self.run_cli_json("members", "get", "a@example.com")
+        self.assertEqual(data["member"]["expires_at"], "2099-02-09T00:00:00-05:00")
+
+        before = self.store_bytes()
+        rc, data = self.run_cli_json("members", "bulk-set-expiry", "--all-active", "--expires-at", "2099-06-09")
+        self.assertEqual((rc, data["dry_run"]), (0, True))
+        self.assertEqual(self.store_bytes(), before)
+        self.run_cli("members", "bulk-set-expiry", "b@example.com", "--date", "2099-06-09", "--apply")
+        rc, data = self.run_cli_json("members", "get", "b@example.com")
+        self.assertEqual(data["member"]["expires_at"], "2099-06-09T00:00:00-04:00")
+
+    def test_bulk_requires_target_selection(self):
+        rc, data = self.run_cli_json("members", "bulk-extend", "--months", "1")
+        self.assertEqual((rc, data["error"]["code"]), (2, "invalid_arguments"))
+        rc, data = self.run_cli_json("members", "bulk-extend", "a@example.com", "--all-active", "--months", "1")
+        self.assertEqual((rc, data["error"]["code"]), (2, "invalid_arguments"))
+
+    def test_record_payment_and_payments_report(self):
+        self.run_cli("members", "add", "a@example.com", "--expires-at", "2099-01-09")
+        rc, data = self.run_cli_json("members", "record-payment", "a@example.com", "--amount", "100", "--currency", "CNY", "--channel", "alipay", "--paid-at", "2026-10-01", "--ref", "r9")
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["member"]["expires_at"], "2099-01-09T00:00:00-05:00")
+        self.assertEqual(data["member"]["total_paid"], {"CNY": 100})
+        rc, data = self.run_cli_json("members", "payments", "--since", "2026-09-01", "--until", "2026-10-01")
+        self.assertEqual((rc, data["count"], data["totals_by_currency"]), (0, 1, {"CNY": 100}))
+        rc, data = self.run_cli_json("members", "payments", "--since", "2026-10-02")
+        self.assertEqual(data["count"], 0)
+
+    def test_human_rendering_of_bulk_results(self):
+        rc, out = self.run_cli("--human", "members", "bulk-add", "a@example.com", "--expires-at", "2026-11-01")
+        self.assertEqual(rc, 0)
+        self.assertIn("results (1):", out)
+        self.assertIn("email=a@example.com", out)
+
+
 if __name__ == "__main__":
     unittest.main()

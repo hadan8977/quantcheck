@@ -1,6 +1,6 @@
 """quantcheck-mcp: MCP stdio server exposing quantcheck.service as tools.
 
-Every tool here is a thin wrapper around exactly one quantcheck.service.members
+Every tool here (22 in total) is a thin wrapper around exactly one quantcheck.service.members
 or quantcheck.service.ops function (plus notify_routes.route_preview), 1:1.
 None of them accept a `root` override -- there is one production deployment,
 and not exposing a raw filesystem path parameter to a remote/LLM-driven
@@ -54,8 +54,13 @@ force=true, because both of those can send a real email. Nothing else \
 requires it (official_mail, health*, daily_admin_status, and unforced picks \
 are exactly what the daemon already runs unattended many times a day, each \
 with its own dedupe/no-op safeguards).
-- migrate_from_recipients defaults to dry_run=true. Only pass dry_run=false \
-once you have reviewed the dry-run output.
+- migrate_from_recipients and the bulk tools (bulk_add_members, \
+bulk_extend_members, bulk_set_expiry) default to dry_run=true and write \
+nothing in that mode. Review the dry-run output (per-email results, skipped \
+entries and why) before calling again with dry_run=false.
+- record_payment and the optional payment fields on add_member / \
+extend_member / bulk_add_members only record money received; they never \
+change who gets mail. record_payment does not touch expiry or status at all.
 - There is no tool to actually send a historical resend -- \
 ops_historical_resend_preview only previews one. A real resend must go \
 through `python -m quantcheck.historical_resend --send --confirm-date ...` \
@@ -105,23 +110,68 @@ def get_member(email: str) -> CallToolResult:
 
 
 @server.tool()
-def add_member(email: str, months: int, note: str | None = None, joined_at: str | None = None) -> CallToolResult:
+def add_member(
+    email: str,
+    months: int | None = None,
+    note: str | None = None,
+    joined_at: str | None = None,
+    expires_at: str | None = None,
+    align: bool = False,
+    amount: float | None = None,
+    currency: str | None = None,
+    channel: str | None = None,
+    paid_at: str | None = None,
+    ref: str | None = None,
+) -> CallToolResult:
     """Create a NEW member and add them to notify_recipients.txt so they start receiving picks mail.
 
     Fails with member_already_exists if this email is already a member -- use extend_member instead.
-    months: how many months of membership to grant, starting from the next 9th-of-the-month anchor after joined_at.
+    Give EXACTLY ONE of:
+    - months: months of membership, starting from the next 9th-of-the-month anchor after joined_at
+      (note: months=1 can be only a few days if the next 9th is close).
+    - expires_at: explicit expiry, "YYYY-MM-DD" or ISO datetime.
+    - align=true: copy the most common expiry among currently-active members (error no_active_members if none).
     joined_at: "YYYY-MM-DD" or a full ISO datetime; defaults to now if omitted.
+    Optional payment record (stored in the history entry; amount is required if any payment field is given):
+    amount, currency (e.g. CNY), channel (e.g. wechat/alipay), paid_at (defaults to now), ref.
     """
-    return _call(members_svc.add_member, email, months, note=note, joined_at=joined_at)
+    return _call(
+        members_svc.add_member,
+        email,
+        months,
+        note=note,
+        joined_at=joined_at,
+        expires_at=expires_at,
+        align=align,
+        payment=members_svc.build_payment(amount, currency, channel, paid_at, ref),
+    )
 
 
 @server.tool()
-def extend_member(email: str, months: int, note: str | None = None) -> CallToolResult:
+def extend_member(
+    email: str,
+    months: int,
+    note: str | None = None,
+    amount: float | None = None,
+    currency: str | None = None,
+    channel: str | None = None,
+    paid_at: str | None = None,
+    ref: str | None = None,
+) -> CallToolResult:
     """Add months to an existing member's expiry (stacks on top of their current expiry if still active,
     otherwise restarts from now). Also reinstates a cancelled member back to active -- paying again is
     treated as an unambiguous signal they should be receiving mail again.
+
+    Optional payment record (amount required if any payment field is given): amount, currency, channel,
+    paid_at (defaults to now), ref.
     """
-    return _call(members_svc.extend_member, email, months, note=note)
+    return _call(
+        members_svc.extend_member,
+        email,
+        months,
+        note=note,
+        payment=members_svc.build_payment(amount, currency, channel, paid_at, ref),
+    )
 
 
 @server.tool()
@@ -171,6 +221,111 @@ def migrate_from_recipients(expires_at: str, note: str | None = None, dry_run: b
 
 
 # ---------------------------------------------------------------------------
+# Bulk operations and payments (all bulk tools default to dry_run=true)
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def bulk_add_members(
+    emails: list[str] | str,
+    months: int | None = None,
+    expires_at: str | None = None,
+    align: bool = False,
+    note: str | None = None,
+    amount: float | None = None,
+    currency: str | None = None,
+    channel: str | None = None,
+    paid_at: str | None = None,
+    ref: str | None = None,
+    dry_run: bool = True,
+) -> CallToolResult:
+    """Add many NEW members at once, all with the same expiry rule. Give EXACTLY ONE of months /
+    expires_at / align=true (same meaning as add_member).
+
+    emails: a list, or one pasted string -- split on whitespace, commas, semicolons and newlines;
+    '#' starts a comment. Invalid addresses (invalid_email) and existing members (already_member) are
+    reported per email and skipped, not fatal; duplicates are collapsed. Any payment fields are recorded
+    on EACH added member (amount is per member, not a total).
+
+    Defaults to dry_run=true: nothing is written. Review the per-email results, then call again with
+    dry_run=false. An apply writes memberships.json once and notify_recipients.txt at most once.
+    """
+    return _call(
+        members_svc.bulk_add,
+        emails,
+        months=months,
+        expires_at=expires_at,
+        align=align,
+        note=note,
+        payment=members_svc.build_payment(amount, currency, channel, paid_at, ref),
+        dry_run=dry_run,
+    )
+
+
+@server.tool()
+def bulk_extend_members(
+    months: int,
+    emails: list[str] | str | None = None,
+    all_active: bool = False,
+    note: str | None = None,
+    dry_run: bool = True,
+) -> CallToolResult:
+    """Run extend_member for many members. Give EXACTLY ONE of emails (list or pasted string) or
+    all_active=true (every currently-active member; legacy/expired/cancelled are not included).
+    Unknown emails are reported member_not_found and skipped. Cancelled members named explicitly are
+    reinstated and re-added to notify_recipients.txt, exactly like extend_member.
+
+    Defaults to dry_run=true: nothing is written. Review the per-email results (previous_expires_at ->
+    expires_at) before calling again with dry_run=false.
+    """
+    return _call(members_svc.bulk_extend, emails, months=months, all_active=all_active, note=note, dry_run=dry_run)
+
+
+@server.tool()
+def bulk_set_expiry(
+    expires_at: str,
+    emails: list[str] | str | None = None,
+    all_active: bool = False,
+    note: str | None = None,
+    dry_run: bool = True,
+) -> CallToolResult:
+    """Run set_expiry (pure date correction, never changes status) with one concrete expires_at for many
+    members. Give EXACTLY ONE of emails (list or pasted string) or all_active=true. Unknown emails are
+    reported member_not_found and skipped.
+
+    Defaults to dry_run=true: nothing is written. Review previous_expires_at -> expires_at per email
+    before calling again with dry_run=false.
+    """
+    return _call(members_svc.bulk_set_expiry, emails, expires_at=expires_at, all_active=all_active, note=note, dry_run=dry_run)
+
+
+@server.tool()
+def record_payment(
+    email: str,
+    amount: float,
+    currency: str | None = None,
+    channel: str | None = None,
+    paid_at: str | None = None,
+    ref: str | None = None,
+    note: str | None = None,
+) -> CallToolResult:
+    """Record a payment received from an existing member as a history entry WITHOUT changing their
+    expiry, status or mail delivery (use extend_member to also grant time). channel e.g. wechat/alipay;
+    paid_at "YYYY-MM-DD" or ISO datetime, defaults to now.
+    """
+    return _call(members_svc.record_payment, email, amount, currency=currency, channel=channel, paid_at=paid_at, ref=ref, note=note)
+
+
+@server.tool()
+def payments_report(since: str | None = None, until: str | None = None) -> CallToolResult:
+    """Recorded payments (from add/extend/record_payment history), filtered by paid_at: since inclusive,
+    until inclusive (a bare date includes that whole day). Returns count, totals_by_currency,
+    totals_by_channel (channel -> currency -> sum) and the payment list. Read-only.
+    """
+    return _call(members_svc.payments_report, since=since, until=until)
+
+
+# ---------------------------------------------------------------------------
 # Routing preview (quantcheck.notify_routes.route_preview)
 # ---------------------------------------------------------------------------
 
@@ -198,7 +353,7 @@ def route_preview(route: str = "picks_update") -> CallToolResult:
 @server.tool()
 def ops_status() -> CallToolResult:
     """Daemon/job status: lock state, health.json contents, latest/previous pick dates, and the next
-    scheduled job. Read-only.
+    scheduled job(s) (`next_job` is the first; `next_jobs` lists every job sharing that time slot, in run order). Read-only.
     """
     return _call(ops_svc.status)
 
