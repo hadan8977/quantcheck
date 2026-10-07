@@ -136,6 +136,51 @@ class FetchResilienceTests(unittest.TestCase):
         self.assertIn("Quant GT Monitor", sent[0]["html_body"])
         self.assertIn("monthly rows stayed empty", sent[0]["html_body"])
 
+    def test_run_check_change_sends_informative_subject_with_diff_aware_excel(self):
+        import copy
+        import json
+        import tempfile
+        from pathlib import Path
+
+        old = copy.deepcopy(VALID_DATA)
+        new = copy.deepcopy(VALID_DATA)
+        new["weekly"]["rows"][0] = weekly_row("NEW1")
+        sent = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            latest = root / "state" / "latest_picks.json"
+            latest.write_text(json.dumps(old), encoding="utf-8")
+            health = root / "state" / "health.json"
+            health.write_text(json.dumps({"mode": "baseline"}), encoding="utf-8")
+            with patch.object(picks_check, "ROOT", root), \
+                 patch.object(picks_check, "STATE", root / "state"), \
+                 patch.object(picks_check, "LATEST", latest), \
+                 patch.object(picks_check, "PREVIOUS", root / "state" / "previous_picks.json"), \
+                 patch.object(picks_check, "HEALTH", health), \
+                 patch.object(picks_check, "LAST_CHANGE_NOTIFICATION", root / "state" / "last_change.json"), \
+                 patch.object(picks_check, "trading_day", return_value=True), \
+                 patch.object(picks_check, "current_window", return_value="premarket_0830"), \
+                 patch.object(picks_check, "fetch_current", return_value=new), \
+                 patch.object(picks_check, "prune_old_files"), \
+                 patch.object(picks_check, "capture_logged_in_screenshots", return_value={}), \
+                 patch.object(picks_check, "log"), \
+                 patch.object(picks_check.report, "export_excel", return_value=root / "r.xlsx") as export_excel, \
+                 patch.object(picks_check, "notify", side_effect=lambda subject, body, media=None, **kw: sent.append((subject, body, kw))):
+                picks_check.run_check(force=False, no_random=True)
+            final_health = json.loads(health.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(sent), 1)
+        subject, body, kwargs = sent[0]
+        self.assertEqual(subject, "Quant GT · Weekly Picks: +NEW1 -W1")
+        self.assertIn("+ Added NEW1", body)
+        self.assertIn("Weekly Picks updated", kwargs["html_body"])
+        self.assertNotIn("window=", kwargs["html_body"])
+        self.assertEqual(export_excel.call_args.kwargs["previous"]["weekly"]["rows"][0]["symbol"], "W1")
+        self.assertTrue(export_excel.call_args.kwargs["diff"]["changed"])
+        # a successful check run must clear the stale mode left by run_baseline
+        self.assertEqual(final_health["mode"], "check")
+
     def test_send_email_raises_when_all_recipients_fail(self):
         with patch.object(picks_check, "load_env", return_value={"NOTIFY_EMAIL_TO": "a@example.com", "NOTIFY_EMAIL_FILE": "", "NOTIFY_ADMIN_EMAIL_TO": "", "NOTIFY_ADMIN_EMAIL_FILE": ""}), \
              patch.object(picks_check, "deliver_email", return_value=([], ["a@example.com"])), \

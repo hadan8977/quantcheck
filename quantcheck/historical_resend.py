@@ -15,6 +15,8 @@ from quantcheck.diff import compare
 from quantcheck.gmail_api_notify import send_email_per_recipient
 from quantcheck.notify_routes import subscriber_recipients
 from quantcheck.picks_check import build_notification_body, build_notification_html, strip_dynamic
+from quantcheck.picks_email import build_subject
+from quantcheck.picks_format import display_date
 
 
 class ResendValidationError(RuntimeError):
@@ -31,11 +33,13 @@ class ResendPlan:
     diff: dict[str, Any]
     body: str
     html: str
+    subject: str = "Quant GT Picks Updated"
 
     def summary(self) -> dict[str, Any]:
         weekly = self.diff.get("weekly", {})
         return {
             "mode": "preview",
+            "subject": self.subject,
             "target_weekly_date": self.target_weekly_date,
             "raw": str(self.raw_path),
             "previous_raw": str(self.previous_raw_path),
@@ -138,10 +142,11 @@ def prepare_resend(root: Path, target_weekly_date: str) -> ResendPlan:
         raise ResendValidationError("reconstructed diff does not end at target weekly date")
 
     attachments = _same_run_attachments(root, raw_path, data)
-    context = f"historical resend: {target_weekly_date}"
-    body = build_notification_body(data, diff, context=context)
-    html = build_notification_html(data, diff, context=context)
-    required_fragments = ["Changes:", target_weekly_date]
+    banner = f"Delayed alert: this {display_date(target_weekly_date)} update was not delivered on time, sorry for the delay."
+    body = build_notification_body(data, diff, previous=previous, banner=banner)
+    html = build_notification_html(data, diff, previous=previous, banner=banner)
+    subject = build_subject(diff, data)
+    required_fragments = ["Changes:", display_date(target_weekly_date)]
     required_fragments.extend(weekly_diff.get("added", []))
     required_fragments.extend(weekly_diff.get("removed", []))
     missing_fragments = [fragment for fragment in required_fragments if fragment and fragment not in body]
@@ -157,6 +162,7 @@ def prepare_resend(root: Path, target_weekly_date: str) -> ResendPlan:
         diff=diff,
         body=body,
         html=html,
+        subject=subject,
     )
 
 
@@ -167,7 +173,7 @@ def execute_resend(plan: ResendPlan, recipients: Sequence[str], confirm_date: st
     if not normalized or len(normalized) != len({recipient.lower() for recipient in normalized}):
         raise ResendValidationError("recipient list is empty or contains duplicates")
     delivered, failed = send_email_per_recipient(
-        "Quant GT Picks Updated",
+        plan.subject,
         plan.body,
         to=normalized,
         attachments=list(plan.attachments),

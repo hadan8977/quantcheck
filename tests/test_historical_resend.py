@@ -61,8 +61,11 @@ class HistoricalResendTests(unittest.TestCase):
         self.assertEqual(plan.raw_path.name, "picks_raw_2026-08-09_120101.json")
         self.assertEqual(plan.diff["weekly"]["added"], ["FROG"])
         self.assertEqual(plan.diff["weekly"]["removed"], ["ARM"])
-        self.assertIn("- Added: FROG", plan.body)
-        self.assertIn("- Removed: ARM", plan.body)
+        self.assertIn("+ Added FROG", plan.body)
+        self.assertIn("- Removed ARM", plan.body)
+        self.assertIn("Delayed alert", plan.body)
+        self.assertEqual(plan.subject, "Quant GT · Weekly Watchlist: +FROG -ARM")
+        self.assertEqual(plan.summary()["subject"], plan.subject)
 
     def test_binds_excel_and_both_screenshots_from_same_fetch(self):
         from quantcheck.historical_resend import prepare_resend
@@ -127,7 +130,7 @@ class HistoricalResendTests(unittest.TestCase):
         self.assertEqual(delivered, ["user@example.com"])
         self.assertEqual(failed, [])
         sender.assert_called_once_with(
-            "Quant GT Picks Updated",
+            plan.subject,
             plan.body,
             to=["user@example.com"],
             attachments=list(plan.attachments),

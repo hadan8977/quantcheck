@@ -16,10 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from openpyxl.utils import get_column_letter
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from quantcheck import picks_excel
 from quantcheck.scrape_parse import clean_text, extract_pick_date, parse_analyst_signal_text, parse_watchlist_dialog_text, rows_from_card_texts, rows_from_matrix
 
 BASE = "https://quantgt.io"
@@ -34,20 +32,6 @@ PROFILE.mkdir(parents=True, exist_ok=True)
 
 EMAIL = os.environ.get("QUANTGT_EMAIL", "")
 PASSWORD = os.environ.get("QUANTGT_PASSWORD", "")
-
-# Quant GT light theme palette
-BG = "FFFFFF"          # default white worksheet background
-SURFACE = "FFFFFF"     # table body white
-SURFACE_2 = "FFFFFF"   # no alternate color; user wants all white
-GREEN = "16A34A"       # Quant GT green
-GREEN_DARK = "0F7A36"
-GREEN_SOFT = "DCFCE7"
-TEXT = "0F172A"        # slate-900
-MUTED = "64748B"       # slate-500
-GRID = "D7E3DA"
-RED = "DC2626"
-AMBER = "D97706"
-
 
 def clean_detail_values(details: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -512,192 +496,10 @@ def fetch():
     }
 
 
-def gt_score_float(v: str):
-    m = re.search(r"[0-9.]+", v or "")
-    return float(m.group(0)) if m else None
-
-
-def pct_float(v: str):
-    m = re.search(r"[-+]?[0-9.]+", v or "")
-    return float(m.group(0)) if m else None
-
-
-def setup_sheet(ws, title, subtitle):
-    ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A7"
-    # Keep worksheet default white; only style headers and data cards.
-    ws.merge_cells("A1:L1")
-    ws["A1"] = title
-    ws["A1"].font = Font(name="Aptos Display", size=22, bold=True, color=TEXT)
-    ws["A1"].fill = PatternFill(fill_type=None)
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[1].height = 34
-
-    ws.merge_cells("A2:L2")
-    ws["A2"] = subtitle
-    ws["A2"].font = Font(name="Aptos", size=11, color=MUTED)
-    ws["A2"].fill = PatternFill(fill_type=None)
-    ws.row_dimensions[2].height = 24
-
-
-def style_table(ws, headers, start_row, widths):
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(start_row, col, h)
-        cell.fill = PatternFill("solid", fgColor=GREEN_SOFT)
-        cell.font = Font(name="Aptos", size=10, bold=True, color=GREEN_DARK)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = Border(bottom=Side(style="medium", color=GREEN), top=Side(style="thin", color=GRID))
-    ws.row_dimensions[start_row].height = 24
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-
-def apply_body_style(ws, min_row, max_row, max_col):
-    for r in range(min_row, max_row + 1):
-        fill = SURFACE if r % 2 else SURFACE_2
-        for c in range(1, max_col + 1):
-            cell = ws.cell(r, c)
-            cell.fill = PatternFill("solid", fgColor=fill)
-            cell.font = Font(name="Aptos", size=10, color=TEXT)
-            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-            cell.border = Border(bottom=Side(style="thin", color=GRID))
-    for row in range(min_row, max_row + 1):
-        ws.row_dimensions[row].height = 28
-
-
-def set_alignments(ws, align_map, min_row, max_row):
-    """align_map: {column_number: horizontal_alignment}"""
-    for c, align in align_map.items():
-        for r in range(min_row, max_row + 1):
-            ws.cell(r, c).alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
-
-
-def set_print_layout(ws, last_col, last_row):
-    ws.freeze_panes = "A7"
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.print_title_rows = "1:6"
-    ws.auto_filter.ref = f"A6:{get_column_letter(last_col)}{last_row}"
-    ws.sheet_view.zoomScale = 95
-
-
-def write_summary(wb, data):
-    ws = wb.active
-    ws.title = "Overview"
-    setup_sheet(ws, "Quant GT Picks Report", f"Fetched at {data['fetched_at']} · Source: quantgt.io")
-
-    # Overview should only show the actual monthly/weekly pick lists, with update dates beside titles.
-    ws.merge_cells("A6:C6")
-    ws.merge_cells("E6:G6")
-    ws.cell(6, 1, f"Portfolio · {data['monthly']['pick_date']}")
-    weekly_title = "Weekly Watchlist" if data["weekly"].get("kind") == "watchlist" else "Weekly Picks"
-    ws.cell(6, 5, f"{weekly_title} · {data['weekly']['pick_date']}")
-    for c in [1, 5]:
-        ws.cell(6, c).fill = PatternFill("solid", fgColor=GREEN_SOFT)
-        ws.cell(6, c).font = Font(name="Aptos", bold=True, color=GREEN_DARK)
-        ws.cell(6, c).alignment = Alignment(horizontal="center", vertical="center")
-        ws.cell(6, c).border = Border(bottom=Side(style="medium", color=GREEN))
-
-    ws.cell(7, 1, "Symbol")
-    ws.cell(7, 2, "GT Score")
-    ws.cell(7, 3, "Return")
-    ws.cell(7, 5, "Symbol")
-    ws.cell(7, 6, "GT Score")
-    ws.cell(7, 7, "Signal")
-    for c in [1, 2, 3, 5, 6, 7]:
-        ws.cell(7, c).fill = PatternFill("solid", fgColor=GREEN_SOFT)
-        ws.cell(7, c).font = Font(name="Aptos", bold=True, color=GREEN_DARK)
-        ws.cell(7, c).alignment = Alignment(horizontal="center", vertical="center")
-        ws.cell(7, c).border = Border(bottom=Side(style="thin", color=GRID))
-
-    for i, r in enumerate(data["monthly"]["rows"], 8):
-        ws.cell(i, 1, r.get("symbol"))
-        ws.cell(i, 2, r.get("gt_score"))
-        ws.cell(i, 3, r.get("return", ""))
-    for i, r in enumerate(data["weekly"]["rows"], 8):
-        ws.cell(i, 5, r.get("symbol"))
-        ws.cell(i, 6, r.get("gt_score"))
-        ws.cell(i, 7, r.get("analyst_signal"))
-
-    max_row = max(8 + len(data['weekly']['rows']) - 1, 8 + len(data['monthly']['rows']) - 1)
-    apply_body_style(ws, 8, max_row, 7)
-    for rr in range(8, max_row + 1):
-        for cc in [1, 5]:
-            ws.cell(rr, cc).font = Font(name="Aptos", size=10, bold=True, color=GREEN)
-        val = str(ws.cell(rr, 3).value or '')
-        if val.startswith('+'):
-            ws.cell(rr, 3).font = Font(name="Aptos", size=10, bold=True, color=GREEN)
-        elif val.startswith('-'):
-            ws.cell(rr, 3).font = Font(name="Aptos", size=10, bold=True, color=RED)
-
-    # Logical alignment: identifiers left, scores/returns centered, labels left.
-    set_alignments(ws, {1: "left", 2: "center", 3: "center", 5: "left", 6: "center", 7: "left"}, 7, max_row)
-    widths = {1: 12, 2: 12, 3: 12, 4: 4, 5: 12, 6: 12, 7: 16}
-    for i, w in widths.items():
-        ws.column_dimensions[get_column_letter(i)].width = w
-    set_print_layout(ws, 7, max_row)
-
-
-def write_picks_sheet(wb, sheet_name, title, pick_date, rows, mode):
-    ws = wb.create_sheet(sheet_name)
-    setup_sheet(ws, title, f"Recommendation date: {pick_date}")
-    if mode == "monthly":
-        headers = ["Rank", "Symbol", "Company", "Held Since", "Return", "Sector", "GT Score", "Current Price", "Entry/Buy Price", "Revenue Growth", "Next Earnings", "Analyst Signal"]
-        widths = [8, 10, 30, 13, 12, 24, 12, 14, 16, 16, 18, 18]
-    else:
-        headers = ["Rank", "Symbol", "Company", "Sector", "GT Score", "Current Price", "Buy Price", "Market Cap", "Revenue Growth", "Next Earnings", "Analyst Signal"]
-        widths = [8, 10, 30, 24, 12, 14, 16, 16, 16, 18, 18]
-    style_table(ws, headers, 6, widths)
-    for idx, r in enumerate(rows, 1):
-        rr = 6 + idx
-        if mode == "monthly":
-            vals = [idx, r.get("symbol"), r.get("company"), r.get("held_since"), r.get("return"), r.get("sector"), r.get("gt_score"), r.get("current_price"), r.get("buy_or_entry_price"), r.get("revenue_growth_yoy"), r.get("next_earnings"), r.get("analyst_signal")]
-        else:
-            vals = [idx, r.get("symbol"), r.get("company"), r.get("sector"), r.get("gt_score"), r.get("current_price"), r.get("buy_or_entry_price"), r.get("market_cap"), r.get("revenue_growth_yoy"), r.get("next_earnings"), r.get("analyst_signal")]
-        for c, v in enumerate(vals, 1):
-            ws.cell(rr, c, v)
-    if rows:
-        apply_body_style(ws, 7, 6 + len(rows), len(headers))
-        data_last_row = 6 + len(rows)
-    else:
-        data_last_row = 6
-    # Logical alignment by field type.
-    if mode == "monthly":
-        align_map = {
-            1: "center", 2: "left", 3: "left", 4: "center", 5: "center", 6: "left",
-            7: "center", 8: "right", 9: "right", 10: "center", 11: "center", 12: "center"
-        }
-    else:
-        align_map = {
-            1: "center", 2: "left", 3: "left", 4: "left", 5: "center", 6: "right",
-            7: "right", 8: "right", 9: "center", 10: "center", 11: "center"
-        }
-    set_alignments(ws, align_map, 7, data_last_row)
-    # Accent key columns
-    for rr in range(7, 7 + len(rows)):
-        for cc in [2, 5 if mode == 'weekly' else 7]:
-            ws.cell(rr, cc).font = Font(name="Aptos", size=10, bold=True, color=GREEN)
-        # Return/revenue growth coloring
-        for cc in range(1, len(headers)+1):
-            val = str(ws.cell(rr, cc).value or '')
-            if val.startswith('+'):
-                ws.cell(rr, cc).font = Font(name="Aptos", size=10, bold=True, color=GREEN)
-            elif val.startswith('-'):
-                ws.cell(rr, cc).font = Font(name="Aptos", size=10, bold=True, color=RED)
-    set_print_layout(ws, len(headers), data_last_row)
-
-
-def export_excel(data) -> Path:
-    wb = Workbook()
-    write_summary(wb, data)
-    write_picks_sheet(wb, "Portfolio", "Portfolio", data["monthly"]["pick_date"], data["monthly"]["rows"], "monthly")
-    weekly_title = "Weekly Watchlist" if data["weekly"].get("kind") == "watchlist" else "Weekly Picks"
-    write_picks_sheet(wb, weekly_title, weekly_title, data["weekly"]["pick_date"], data["weekly"]["rows"], "weekly")
-
+def export_excel(data, diff=None, previous=None) -> Path:
+    """Write the subscriber Excel report; layout lives in quantcheck.picks_excel."""
     path = OUT_DIR / f"quantgt_picks_report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
-    wb.save(path)
-    return path
+    return picks_excel.write_report(path, data, diff=diff, previous=previous)
 
 
 def main():

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import html
 import json
 import os
 import random
@@ -30,6 +29,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # Reuse the existing fetch/export implementation so Excel formatting stays in one place.
 from quantcheck.config import load_env as load_dotenv
 from quantcheck.diff import compare
+from quantcheck import picks_email
 from quantcheck import picks_report as report
 from quantcheck.notify_dedupe import should_send_notification
 from quantcheck.gmail_api_notify import send_email_per_recipient as deliver_email
@@ -108,246 +108,37 @@ def strip_dynamic(data: Dict[str, Any]) -> Dict[str, Any]:
     return d
 
 
-def format_row_brief(row: Dict[str, Any], fields: List[str]) -> str:
-    parts = []
-    for field in fields:
-        value = row.get(field)
-        if value not in (None, ''):
-            label = field.replace('_', ' ').title()
-            parts.append(f'{label}: {value}')
-    return '; '.join(parts)
-
-
 def section_title(default: str, section: Dict[str, Any]) -> str:
     if section.get('kind') == 'watchlist':
         return 'Weekly Watchlist'
     return default
 
 
-def format_pick_list(title: str, section: Dict[str, Any], max_rows: int = 12) -> List[str]:
-    rows = section.get('rows', []) or []
-    title = section_title(title, section)
-    lines = [f"{title}: {section.get('pick_date', 'Unknown')} · {len(rows)} stocks"]
-    if not rows:
-        lines.append('- None captured')
-        return lines
-    for idx, row in enumerate(rows[:max_rows], 1):
-        if title.startswith('Monthly'):
-            meta = format_row_brief(row, ['return', 'gt_score', 'current_price', 'buy_or_entry_price', 'analyst_signal'])
-        else:
-            meta = format_row_brief(row, ['gt_score', 'current_price', 'buy_or_entry_price', 'analyst_signal'])
-        symbol = row.get('symbol') or '?'
-        company = row.get('company') or ''
-        lines.append(f"{idx}. {symbol} — {company}" + (f" | {meta}" if meta else ''))
-    if len(rows) > max_rows:
-        lines.append(f'- ... {len(rows) - max_rows} more stocks in attached Excel')
-    return lines
-
-
-def build_notification_html(data: Dict[str, Any], diff: Dict[str, Any] | None = None, context: str = 'change') -> str:
-    def esc(v: Any) -> str:
-        return html.escape(str(v or ''))
-
-    def table(section_name: str, section: Dict[str, Any], mode: str) -> str:
-        rows = section.get('rows', []) or []
-        if mode == 'monthly':
-            cols = [
-                ('return', 'Return'),
-                ('gt_score', 'GT Score'),
-                ('current_price', 'Price'),
-                ('buy_or_entry_price', 'Entry'),
-                ('analyst_signal', 'Analyst Signal'),
-                ('next_earnings', 'Earnings'),
-            ]
-        else:
-            cols = [
-                ('sector', 'Sector'),
-                ('gt_score', 'GT Score'),
-                ('current_price', 'Price'),
-                ('buy_or_entry_price', 'Buy'),
-                ('analyst_signal', 'Analyst Signal'),
-            ]
-
-        def metric(label: str, value: Any, key: str) -> str:
-            sval = str(value or '')
-            val_style = 'font-size:14px;line-height:1.3;color:#0f172a;font-weight:700;word-break:break-word;'
-            if key in {'return', 'gt_score'}:
-                if sval.startswith('+'):
-                    val_style += 'color:#16a34a;'
-                elif sval.startswith('-'):
-                    val_style += 'color:#dc2626;'
-            return f'''
-                <div style="display:block;margin:8px 0 0 0;">
-                  <div style="font-size:11px;line-height:1.25;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">{esc(label)}</div>
-                  <div style="{val_style}">{esc(value)}</div>
-                </div>'''
-
-        cards = []
-        for idx, row in enumerate(rows, 1):
-            symbol = row.get('symbol') or '?'
-            company = row.get('company') or ''
-            metrics = ''.join(metric(label, row.get(key, ''), key) for key, label in cols if row.get(key) not in (None, ''))
-            cards.append(f'''
-              <tr>
-                <td style="padding:0 0 10px 0;">
-                  <div style="display:block;border:1px solid #d7e3da;border-radius:12px;background:#ffffff;padding:12px 13px;">
-                    <div style="font-size:17px;line-height:1.25;font-weight:800;color:#16a34a;word-break:break-word;">{esc(symbol)}</div>
-                    <div style="font-size:14px;line-height:1.35;color:#334155;margin-top:2px;word-break:break-word;">{esc(company)}</div>
-                    {metrics}
-                  </div>
-                </td>
-              </tr>''')
-        if not cards:
-            cards.append(f'<tr><td style="{TD}">No rows captured</td></tr>')
-        return f'''
-        <section style="margin:20px 0 0 0;">
-          <h2 style="font-size:18px;line-height:1.3;color:#0f172a;margin:0 0 6px 0;">{esc(section_title(section_name, section))}</h2>
-          <div style="font-size:15px;color:#64748b;margin:0 0 10px 0;">Date: {esc(section.get('pick_date', 'Unknown'))} · {len(rows)} stocks</div>
-          <table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:collapse;width:100%;font-size:15px;line-height:1.4;">
-            <tbody>{''.join(cards)}</tbody>
-          </table>
-        </section>'''
-
-    def change_box(diff_obj: Dict[str, Any] | None) -> str:
-        if diff_obj is None:
-            return ''
-
-        tag_style = 'display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:700;line-height:1;background:#ffffff;border:1px solid #d7e3da;color:#334155;margin:0 6px 6px 0;white-space:normal;'
-        add_pill = tag_style + 'border-color:#86efac;background:#f0fdf4;color:#15803d;'
-        remove_pill = tag_style + 'border-color:#fecaca;background:#fff7f7;color:#b91c1c;'
-        change_card = 'display:block;border:1px solid #d7e3da;border-radius:12px;background:#ffffff;padding:11px 12px;margin:0 0 8px 0;'
-        change_label = 'font-size:11px;line-height:1.25;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin-top:7px;'
-        change_value = 'font-size:14px;line-height:1.35;color:#0f172a;font-weight:700;word-break:break-word;'
-        old_value = change_value + 'color:#64748b;font-weight:600;'
-        new_value = change_value + 'color:#0f7a36;'
-
-        def field_label(name: str) -> str:
-            return esc(str(name).replace('_', ' ').title())
-
-        def pills(items: List[Any], style: str) -> str:
-            if not items:
-                return ''
-            return ''.join(f'<span style="{style}">{esc(item)}</span>' for item in items)
-
-        def change_row(symbol: str, field: str, old: Any, new: Any) -> str:
-            return f'''
-              <div style="{change_card}">
-                <div style="font-size:16px;line-height:1.25;font-weight:800;color:#16a34a;word-break:break-word;">{esc(symbol or '?')}</div>
-                <div style="{change_label}">Field</div>
-                <div style="{change_value}">{field_label(field)}</div>
-                <div style="{change_label}">Previous</div>
-                <div style="{old_value}">{esc(old)}</div>
-                <div style="{change_label}">New</div>
-                <div style="{new_value}">{esc(new)}</div>
-              </div>'''
-
-        def changed_rows(rows: List[Dict[str, Any]]) -> str:
-            parts = []
-            for row in rows:
-                fields = row.get('fields') or {}
-                symbol = row.get('symbol') or '?'
-                for name, vals in fields.items():
-                    parts.append(change_row(symbol, name, vals.get('old'), vals.get('new')))
-            return ''.join(parts)
-
-        def section(key: str, title: str) -> str:
-            d = diff_obj.get(key, {}) or {}
-            if not d.get('changed_flag'):
-                return ''
-            added = d.get('added') or []
-            removed = d.get('removed') or []
-            changed = d.get('changed') or []
-            date = d.get('date')
-            summary_bits = []
-            if date:
-                summary_bits.append('date')
-            if added:
-                summary_bits.append(f'+{len(added)} added')
-            if removed:
-                summary_bits.append(f'-{len(removed)} removed')
-            if changed:
-                summary_bits.append(f'{len(changed)} changed')
-            summary = ' · '.join(summary_bits) if summary_bits else 'changed'
-            date_rows = ''
-            if date:
-                date_rows = change_row('—', 'Date', date.get('old'), date.get('new'))
-            add_remove_rows = ''
-            if added:
-                add_remove_rows += f'''
-              <div style="{change_card}">
-                <div style="font-size:16px;line-height:1.25;font-weight:800;color:#16a34a;">Added</div>
-                <div style="margin-top:8px;">{pills(added, add_pill)}</div>
-              </div>'''
-            if removed:
-                add_remove_rows += f'''
-              <div style="{change_card}">
-                <div style="font-size:16px;line-height:1.25;font-weight:800;color:#b91c1c;">Removed</div>
-                <div style="margin-top:8px;">{pills(removed, remove_pill)}</div>
-              </div>'''
-            rows_html = date_rows + add_remove_rows + changed_rows(changed)
-            if not rows_html:
-                rows_html = f'<div style="{change_card}">No detail rows captured</div>'
-            return f'''
-            <div style="margin:14px 0 0 0;">
-              <h3 style="font-size:18px;line-height:1.3;color:#0f172a;margin:0 0 6px 0;">{esc(title)}</h3>
-              <div style="font-size:15px;color:#64748b;margin:0 0 10px 0;">{esc(summary)}</div>
-              {rows_html}
-            </div>'''
-
-        return f'''
-        <section style="margin:18px 0 0 0;background:#f8fafc;border:1px solid #d7e3da;border-radius:12px;padding:14px 16px;">
-          <h2 style="font-size:17px;color:#0f172a;margin:0;">Changes Summary</h2>
-          <div style="font-size:13px;color:#64748b;line-height:1.45;margin-top:4px;">Grouped by list, then by change type. Green chips are new values; gray chips are previous values.</div>
-          {section('monthly', 'Portfolio')}
-          {section('weekly', section_title('Weekly Picks', weekly))}
-        </section>'''
-
-    monthly = data.get('monthly', {})
-    weekly = data.get('weekly', {})
-    fetched = data.get('fetched_at') or now_utc()
-    TH = 'background:#dcfce7;color:#0f7a36;border-bottom:2px solid #16a34a;padding:12px 13px;text-align:left;font-size:14px;white-space:normal;'
-    TD = 'border-bottom:1px solid #d7e3da;padding:12px 13px;color:#0f172a;vertical-align:middle;background:#ffffff;'
-    return f'''<!doctype html>
-<html>
-  <body style="margin:0;padding:0;background:#f6f8f7;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">
-    <div style="max-width:680px;margin:0 auto;padding:12px 8px;">
-      <div style="background:#ffffff;border:1px solid #d7e3da;border-radius:16px;padding:18px 14px;">
-        <div style="font-size:12px;color:#16a34a;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">Quant GT Monitor</div>
-        <h1 style="font-size:26px;line-height:1.2;margin:6px 0 8px 0;color:#0f172a;">Picks Report</h1>
-        <div style="font-size:13px;color:#64748b;line-height:1.5;">Context: {esc(context)}<br>Fetched: {esc(fetched)}<br>Source: {esc(data.get('source', BASE))}</div>
-        {change_box(diff)}
-        {table('Portfolio', monthly, 'monthly')}
-        {table('Weekly Picks', weekly, 'weekly')}
-      </div>
-    </div>
-  </body>
-</html>'''
+def build_notification_html(
+    data: Dict[str, Any],
+    diff: Dict[str, Any] | None = None,
+    context: str = 'change',
+    previous: Dict[str, Any] | None = None,
+    banner: str | None = None,
+) -> str:
+    """Subscriber picks email HTML. `context` is internal run metadata and is
+    deliberately not rendered; pass `banner` for a visible note (admin test,
+    delayed resend). Layout lives in quantcheck.picks_email."""
+    return picks_email.build_html(data, diff, previous=previous, banner=banner)
 
 
 def build_system_alert_html(title: str, cards: List[Dict[str, Any]], context: str = 'system alert') -> str:
     return build_card_email_html(title, cards, context=context)
 
 
-def build_notification_body(data: Dict[str, Any], diff: Dict[str, Any] | None = None, context: str = 'change') -> str:
-    fetched = data.get('fetched_at') or now_utc()
-    monthly = data.get('monthly', {})
-    weekly = data.get('weekly', {})
-    lines = [
-        'Quant GT Picks Monitor',
-        f'Context: {context}',
-        f'Fetched: {fetched}',
-        f"Source: {data.get('source', BASE)}",
-    ]
-    if diff is not None:
-        lines += ['', 'Changes:', summarize_diff(diff)]
-    lines += [
-        '',
-        'Current Picks:',
-        *format_pick_list('Portfolio', monthly),
-        '',
-        *format_pick_list('Weekly Picks', weekly),
-    ]
-    return '\n'.join(lines)
+def build_notification_body(
+    data: Dict[str, Any],
+    diff: Dict[str, Any] | None = None,
+    context: str = 'change',
+    previous: Dict[str, Any] | None = None,
+    banner: str | None = None,
+) -> str:
+    return picks_email.build_text(data, diff, previous=previous, banner=banner)
 
 
 def build_telegram_body(data: Dict[str, Any], diff: Dict[str, Any] | None = None, context: str = 'change') -> str:
@@ -658,7 +449,7 @@ def run_test_email(recipient: str | None = None):
         excel = report.export_excel(data)
         shots = capture_logged_in_screenshots(['monthly', 'weekly'], expected_data=data)
         tg_body = build_telegram_body(data, None, context='manual full-flow test')
-        summary_body = build_notification_body(data, None, context='manual full-flow test')
+        summary_body = build_notification_body(data, None)
         body = '\n'.join([
             'Quant GT Monitor test completed successfully.',
             'Route: administrators only',
@@ -673,7 +464,7 @@ def run_test_email(recipient: str | None = None):
             'Screenshots:',
             *[f'{name}: {path}' for name, path in shots.items()],
         ])
-        html_body = build_notification_html(data, None, context='manual full-flow test passed')
+        html_body = build_notification_html(data, None, banner='Admin test: full scrape, Excel and screenshot flow passed. Subscribers did not receive this.')
         media = [excel] + list(shots.values())
         route = EmailRoute.PICKS_UPDATE if recipient else EmailRoute.ADMIN
         to = [recipient] if recipient else None
@@ -785,12 +576,13 @@ def run_check(force=False, no_random=False):
         if old is None:
             json_dump(LATEST, data)
             json_dump(ROOT / 'latest_picks.json', data)
-            write_health(last_run_at=now_utc(), last_success_at=now_utc(), last_error=None, consecutive_failures=0, last_window=window or 'forced')
+            write_health(last_run_at=now_utc(), last_success_at=now_utc(), last_error=None, consecutive_failures=0, last_window=window or 'forced', mode='check')
             log('initialized latest state, no notification')
             return
         diff = compare(strip_dynamic(old), strip_dynamic(data))
         write_health(last_run_at=now_utc(), last_success_at=now_utc(), last_error=None, consecutive_failures=0,
-                     last_window=window or 'forced', monthly_date=data['monthly']['pick_date'], weekly_date=data['weekly']['pick_date'], changed=diff['changed'])
+                     last_window=window or 'forced', monthly_date=data['monthly']['pick_date'], weekly_date=data['weekly']['pick_date'], changed=diff['changed'],
+                     mode='check')
         if not diff['changed']:
             log('no pick changes')
             return
@@ -802,17 +594,19 @@ def run_check(force=False, no_random=False):
         PREVIOUS.write_text(LATEST.read_text(encoding='utf-8'), encoding='utf-8')
         json_dump(LATEST, data)
         json_dump(ROOT / 'latest_picks.json', data)
-        excel = report.export_excel(data)
+        excel = report.export_excel(data, diff=diff, previous=old)
         prune_old_files(OUTPUT, 'quantgt_picks_report_*.xlsx', keep=80)
         shots = capture_logged_in_screenshots(['monthly', 'weekly'], expected_data=data)
         prune_old_files(SHOTS, 'portfolio_*.png', keep=80)
         prune_old_files(SHOTS, 'watchlist_*.png', keep=80)
         prune_old_files(SHOTS, '*_picks_*.png', keep=160)
         tg_body = build_telegram_body(data, diff, context=f'picks changed · window={window or "forced"}')
-        body = build_notification_body(data, diff, context=f'picks changed · window={window or "forced"}')
-        html_body = build_notification_html(data, diff, context=f'picks changed · window={window or "forced"}')
+        body = build_notification_body(data, diff, previous=old)
+        html_body = build_notification_html(data, diff, previous=old)
         media = [excel] + list(shots.values())
-        notify('Quant GT Picks Updated', body, media, html_body=html_body, telegram_body=tg_body)
+        subject = picks_email.build_subject(diff, data)
+        log(f'notifying subscribers: {subject} (window={window or "forced"})')
+        notify(subject, body, media, html_body=html_body, telegram_body=tg_body)
     except Exception as e:
         tb = traceback.format_exc()
         log('check failed: ' + tb)

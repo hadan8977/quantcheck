@@ -11,7 +11,7 @@ from quantcheck.picks_check import build_notification_html
 
 
 class NotificationHtmlTests(unittest.TestCase):
-    def test_changes_are_rendered_as_grouped_cards_not_single_long_list(self):
+    def test_changes_are_grouped_by_list_with_added_removed_and_field_lines(self):
         data = {
             "fetched_at": "2026-05-24T16:10:09",
             "source": "https://quantgt.io",
@@ -42,11 +42,11 @@ class NotificationHtmlTests(unittest.TestCase):
 
         html = build_notification_html(data, diff, context="picks changed · window=forced")
 
-        self.assertIn("Changes Summary", html)
+        self.assertIn("What changed", html)
         self.assertIn("Portfolio", html)
         self.assertIn("Weekly Picks", html)
-        self.assertIn("Added", html)
-        self.assertIn("Removed", html)
+        self.assertIn("ADDED", html)
+        self.assertIn("REMOVED", html)
         self.assertIn("INTC", html)
         self.assertIn("GLW", html)
         self.assertIn("AAOI", html)
@@ -55,10 +55,14 @@ class NotificationHtmlTests(unittest.TestCase):
         self.assertIn("Buy +0.45", html)
         self.assertIn("Strong Buy +0.60", html)
         self.assertIn("Buy +0.38", html)
-        self.assertIn("New", html)
+        self.assertIn("(-0.22)", html)  # signal delta, coloured
+        self.assertIn("GT Score re-rated", html)  # gt_score changes collapse into chips
         self.assertNotIn("<ul", html)
+        # internal run metadata is never shown to subscribers
+        self.assertNotIn("window=forced", html)
+        self.assertNotIn("Context:", html)
 
-    def test_changes_use_email_safe_tables_aligned_with_picks_tables(self):
+    def test_changes_use_compact_email_safe_tables(self):
         data = {
             "fetched_at": "2026-05-24T16:10:09",
             "source": "https://quantgt.io",
@@ -85,12 +89,14 @@ class NotificationHtmlTests(unittest.TestCase):
 
         self.assertNotIn('min-width:980px', html)
         self.assertNotIn('min-width:760px', html)
-        self.assertIn('Field', html)
-        self.assertIn('Previous', html)
-        self.assertIn('New', html)
+        self.assertIn('role="presentation"', html)
         self.assertIn('AAOI', html)
-        self.assertIn('display:block', html)
         self.assertIn('Analyst Signal', html)
+        self.assertIn('Neutral +0.02', html)
+        # one line per field change, not the old Field/Previous/New stacked card
+        self.assertNotIn('>Previous<', html)
+        self.assertIn('+97.02%', html)
+        self.assertIn('entry $90.15', html)
         self.assertNotIn('overflow-x:auto', html)
         self.assertNotIn('min-width:98px', html)
 
@@ -127,10 +133,11 @@ class NotificationHtmlTests(unittest.TestCase):
         html = build_notification_html(data, None)
 
         self.assertIn("Weekly Watchlist", html)
-        self.assertIn("GT Score", html)
-        self.assertIn("4.96/5", html)
-        self.assertIn("$618.82", html)
+        self.assertIn("4.96", html)
+        self.assertIn(" GT", html)
+        self.assertIn("buy $618.82", html)
         self.assertIn("Buy +0.24", html)
+        self.assertIn("1 stock<", html)
 
 
 if __name__ == "__main__":
