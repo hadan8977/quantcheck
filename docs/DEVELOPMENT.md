@@ -11,8 +11,11 @@ quantcheck/
   diff.py                pick diff logic and analyst-signal thresholds
   validation.py          member-data and demo-data guards
   schedule.py            daemon schedule parsing
-  picks_report.py        Playwright scrape and Excel export
+  picks_report.py        Playwright scrape (Excel export delegates to picks_excel.py)
   picks_check.py         pick monitor orchestration
+  picks_email.py         subscriber alert subject, HTML and plain-text body
+  picks_excel.py         subscriber Excel report (typed cells, Changes sheet)
+  picks_format.py        shared value parsing/labels for email and Excel
   site_snapshot.py       authenticated site snapshot capture
   site_diff_notify.py    site-change diff and alerting
   official_mail_forwarder.py
@@ -50,7 +53,10 @@ python -m quantcheck.picks_check --test-email
 
 ## Design Notes
 
-- `picks_report.py` owns Playwright scraping and Excel formatting.
+- `picks_report.py` owns Playwright scraping; `picks_excel.py` owns the Excel layout.
+- `picks_email.py` owns the subscriber alert. Keep it pure (data, diff, previous snapshot in; strings out) and email-client safe: table layout, inline styles, no scheduler/window internals in subscriber mail. Admin-only notes go through the `banner` argument.
+- To preview a design change without touching subscribers, render real `state/raw/` snapshots with `picks_email.build_html()` and send with `picks_check.send_email(..., route=EmailRoute.ADMIN)`.
+- `historical_resend` validates the Excel by sheet name (`Portfolio`, `Weekly Watchlist`) and a `Symbol` header whose column holds only tickers; keep that contract when changing the Excel layout.
 - `picks_check.py` orchestrates baseline/check/test-email flows.
 - `official_mail_forwarder.py` forwards matching official Quant GT emails to the same picks-update route as scraper-detected changes.
 - `diff.py` should stay pure and easy to unit test.

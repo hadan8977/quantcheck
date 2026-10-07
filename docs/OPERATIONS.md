@@ -25,7 +25,7 @@ NOTIFY_ADMIN_EMAIL_FILE=notify_admin_recipients.txt
 
 Recipient routing is intentionally split:
 
-- `NOTIFY_EMAIL_TO` / `NOTIFY_EMAIL_FILE`: subscribers. They only receive successful `Quant GT Picks Updated` reports.
+- `NOTIFY_EMAIL_TO` / `NOTIFY_EMAIL_FILE`: subscribers. They only receive successful picks-change alerts (subject starts with `Quant GT · `, e.g. `Quant GT · Portfolio rebalance: +MRNA -HPE`; built by `quantcheck/picks_email.py`) and forwarded official Quant GT mail.
 - `NOTIFY_ADMIN_EMAIL_TO` / `NOTIFY_ADMIN_EMAIL_FILE`: admins. They receive all operator mail, including picks updates, scrape failures, health alerts, site/function changes, official-mail check/forward failures, and full-flow test emails.
 
 Create recipient list files with one address per line. Commas and semicolons are also accepted, and `#` starts a comment:
