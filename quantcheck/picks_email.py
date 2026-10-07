@@ -21,15 +21,18 @@ from typing import Any, Dict, List
 from quantcheck.picks_format import (
     compact_symbols,
     display_date,
+    fetched_at_utc,
     field_label,
     format_fetched,
     format_gt,
     is_blank,
+    parse_date,
     parse_gt_score,
     parse_pct,
     parse_signal,
     rows_by_symbol,
     section_title,
+    since_signal,
     short_date,
     stock_count,
 )
@@ -144,11 +147,11 @@ def build_subject(diff: Dict[str, Any] | None, data: Dict[str, Any]) -> str:
         signals = _signal_changes(diff or {})
         if len(signals) == 1:
             symbol, old, new = signals[0]
-            text = f"Analyst signal: {symbol} {old or '—'} → {new or '—'}"
+            text = f"Analyst consensus: {symbol} {old or '—'} → {new or '—'}"
         else:
             symbols = [s for s, _, _ in signals]
             more = f" +{len(symbols) - 3} more" if len(symbols) > 3 else ""
-            text = f"Analyst signal changes: {', '.join(symbols[:3])}{more}"
+            text = f"Analyst consensus changes: {', '.join(symbols[:3])}{more}"
     elif kind == "details":
         symbols = sorted({s for k in SECTIONS for s, _, _, _ in _visible_changes(_section_diff(diff, k))})
         fields = sorted({field_label(f) for k in SECTIONS for _, f, _, _ in _visible_changes(_section_diff(diff, k))})
@@ -169,7 +172,7 @@ def _headline(kind: str, data: Dict[str, Any]) -> str:
         "both": f"Portfolio rebalanced & {weekly_title} updated",
         "rebalance": "Portfolio rebalanced",
         "watchlist": f"{weekly_title} updated",
-        "signal": "Analyst signal change",
+        "signal": "Analyst consensus change",
         "details": "Pick details updated",
         "refresh": "Picks refreshed",
         "none": "Current picks",
@@ -187,7 +190,7 @@ def _section_summary(key: str, sec: Dict[str, Any], data: Dict[str, Any]) -> str
     signals = {s for s, f, _, _ in changes if f == "analyst_signal"}
     other = {s for s, f, _, _ in changes if f not in ("gt_score", "analyst_signal")}
     if signals:
-        bits.append(f"analyst signal moved on {len(signals)} stock{'s' if len(signals) != 1 else ''}")
+        bits.append(f"analyst consensus moved on {len(signals)} stock{'s' if len(signals) != 1 else ''}")
     if gt:
         bits.append(f"GT Score re-rated on {len(gt)}")
     if other:
@@ -234,7 +237,12 @@ def _row_meta(row: Dict[str, Any], key: str) -> str:
     return " · ".join(bits)
 
 
-def _row_figure(row: Dict[str, Any], key: str) -> str:
+def _signal_day(row: Dict[str, Any]) -> str:
+    day = parse_date(row.get("signal_date"))
+    return f"{day:%b} {day.day}" if day else str(row.get("signal_date") or "")
+
+
+def _row_figure(row: Dict[str, Any], key: str, as_of=None) -> str:
     """Right-hand column: Return for the Portfolio, GT Score for the watchlist."""
     price = row.get("current_price")
     entry = row.get("buy_or_entry_price")
@@ -248,27 +256,38 @@ def _row_figure(row: Dict[str, Any], key: str) -> str:
     else:
         gt = parse_gt_score(row.get("gt_score"))
         main = f'{gt:.2f}<span style="font-size:11px;color:{FAINT};font-weight:600;"> GT</span>' if gt is not None else "&nbsp;"
+        move = since_signal(row, as_of)
+        if move is not None:
+            when = f" since {_signal_day(row)}" if row.get("signal_date") else " since signal"
+            sub += f'<br><span style="color:{_signed_color(move)};font-weight:700;">{move * 100:+.1f}%</span>{esc(when)}'
+
     return (
         f'<div style="font-size:16px;line-height:1.25;font-weight:700;color:{INK};white-space:nowrap;">{main}</div>'
         f'<div style="font-size:12px;line-height:1.4;color:{MUTED};white-space:nowrap;margin-top:2px;">{sub}</div>'
     )
 
 
-def _stock_row(row: Dict[str, Any], key: str, badge: str = "", figure: bool = True, note: str = "") -> str:
+def _stock_row(row: Dict[str, Any], key: str, badge: str = "", figure: bool = True, note: str = "", as_of=None) -> str:
     symbol = row.get("symbol") or "?"
     company = row.get("company") or ""
     meta = note or _row_meta(row, key)
+    reason = row.get("watch_reason")
+    reason_html = (
+        f'<div style="font-size:12px;line-height:1.4;color:{UP};font-weight:600;margin-top:1px;">{esc(reason)}</div>'
+        if key == "weekly" and not is_blank(reason) else ""
+    )
     right = ""
     if figure:
         right = (
             f'<td valign="top" align="right" style="padding:10px 0 10px 10px;border-top:1px solid {LINE};width:1%;">'
-            f'{_row_figure(row, key)}</td>'
+            f'{_row_figure(row, key, as_of)}</td>'
         )
     return f'''
       <tr>
         <td valign="top" style="padding:10px 0;border-top:1px solid {LINE};">
           <div style="font-size:15px;line-height:1.3;font-weight:800;color:{INK};">{esc(symbol)} {badge}</div>
           <div style="font-size:13px;line-height:1.35;color:#334155;">{esc(company)}</div>
+          {reason_html}
           <div style="font-size:12px;line-height:1.45;color:{MUTED};margin-top:2px;">{meta}</div>
         </td>
         {right}
@@ -366,7 +385,7 @@ def _changes_block(key: str, sec: Dict[str, Any], data: Dict[str, Any], previous
     return f'<div style="margin:0 0 18px 0;">{"".join(parts)}</div>'
 
 
-def _holdings_block(key: str, data: Dict[str, Any], added: List[str]) -> str:
+def _holdings_block(key: str, data: Dict[str, Any], added: List[str], as_of=None) -> str:
     section = data.get(key) or {}
     rows = section.get("rows") or []
     title = section_title(key, section)
@@ -374,7 +393,7 @@ def _holdings_block(key: str, data: Dict[str, Any], added: List[str]) -> str:
     if not rows:
         return f'<div style="margin:22px 0 0 0;">{header}<div style="font-size:13px;color:{MUTED};">No rows captured.</div></div>'
     body = "".join(
-        _stock_row(row, key, _pill("NEW", UP, "#dcfce7") if (row.get("symbol") in added) else "")
+        _stock_row(row, key, _pill("NEW", UP, "#dcfce7") if (row.get("symbol") in added) else "", as_of=as_of)
         for row in rows
     )
     return f'<div style="margin:22px 0 0 0;">{header}{_table(body)}</div>'
@@ -412,7 +431,7 @@ def build_html(
 
     ordered = sorted(SECTIONS, key=lambda k: 0 if _section_diff(diff, k) else 1)
     holdings_html = "".join(
-        _holdings_block(k, data, list(_section_diff(diff, k).get("added") or [])) for k in ordered
+        _holdings_block(k, data, list(_section_diff(diff, k).get("added") or []), fetched_at_utc(data)) for k in ordered
     )
 
     return f'''<!doctype html>
@@ -447,7 +466,7 @@ def build_html(
 # ---------------------------------------------------------------------------
 
 
-def _text_row(row: Dict[str, Any], key: str) -> str:
+def _text_row(row: Dict[str, Any], key: str, as_of=None) -> str:
     bits = []
     if key == "monthly" and not is_blank(row.get("return")):
         bits.append(str(row.get("return")))
@@ -460,6 +479,11 @@ def _text_row(row: Dict[str, Any], key: str) -> str:
         bits.append(price)
     if not is_blank(row.get("analyst_signal")):
         bits.append(str(row.get("analyst_signal")))
+    move = since_signal(row, as_of) if key == "weekly" else None
+    if move is not None:
+        bits.append(f"{move * 100:+.1f}% since {_signal_day(row) or 'signal'}")
+    if key == "weekly" and not is_blank(row.get("watch_reason")):
+        bits.append(str(row.get("watch_reason")))
     return f"{row.get('symbol') or '?'} — {row.get('company') or ''}" + (f" | {' · '.join(bits)}" if bits else "")
 
 
@@ -504,7 +528,7 @@ def build_text(
         section = data.get(key) or {}
         rows = section.get("rows") or []
         lines += ["", f"{section_title(key, section)} — {display_date(section.get('pick_date'))} · {stock_count(len(rows))}"]
-        lines += [f"  {i}. {_text_row(row, key)}" for i, row in enumerate(rows, 1)] or ["  (no rows captured)"]
+        lines += [f"  {i}. {_text_row(row, key, fetched_at_utc(data))}" for i, row in enumerate(rows, 1)] or ["  (no rows captured)"]
     fetched = format_fetched(data)
     lines += ["", "Full details: attached Excel report and page screenshots."]
     if fetched:

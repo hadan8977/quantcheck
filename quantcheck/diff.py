@@ -25,6 +25,13 @@ DYNAMIC_NOISE_FIELDS = {
     # Which page layout a row was parsed from (table vs watchlist card); flipped
     # on every weekly row on 2026-07-02 and produced a meaningless alert.
     "source_kind",
+    # Watchlist context added 2026-10: this week's signal price/date from the
+    # weekly API and the one-line reason from the Weekly Digest (best-effort,
+    # may be missing on a given run). Display only, never a pick change.
+    "signal_price",
+    "signal_date",
+    "signal_at",
+    "watch_reason",
 }
 
 # Quant GT's analyst score is very jumpy: in 2026-06..09 snapshots the median

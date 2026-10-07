@@ -91,7 +91,7 @@ class NotificationHtmlTests(unittest.TestCase):
         self.assertNotIn('min-width:760px', html)
         self.assertIn('role="presentation"', html)
         self.assertIn('AAOI', html)
-        self.assertIn('Analyst Signal', html)
+        self.assertIn('Analyst Consensus', html)
         self.assertIn('Neutral +0.02', html)
         # one line per field change, not the old Field/Previous/New stacked card
         self.assertNotIn('>Previous<', html)

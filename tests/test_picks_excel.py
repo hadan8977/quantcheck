@@ -71,8 +71,8 @@ class PicksExcelTests(unittest.TestCase):
         self.assertEqual(ws.cell(r, cols["Price"]).number_format, picks_excel.FMT_MONEY)
         self.assertAlmostEqual(ws.cell(r, cols["Return"]).value, 0.089)
         self.assertEqual(ws.cell(r, cols["GT Score"]).value, 4.61)
-        self.assertEqual(ws.cell(r, cols["Analyst Signal"]).value, "Buy")
-        self.assertEqual(ws.cell(r, cols["Signal Score"]).value, 0.42)
+        self.assertEqual(ws.cell(r, cols["Analyst Consensus"]).value, "Buy")
+        self.assertEqual(ws.cell(r, cols["Consensus Score"]).value, 0.42)
         self.assertEqual(ws.cell(r, cols["Next Earnings"]).value, datetime(2026, 10, 29))
         self.assertEqual(ws.cell(r, cols["Market Cap"]).value, 81.10e9)
         self.assertNotIn("P/E (TTM)", cols)  # "—" for every row -> column dropped
@@ -99,3 +99,24 @@ class PicksExcelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchlistExcelTests(unittest.TestCase):
+    def test_watchlist_sheet_has_signal_and_reason_columns(self):
+        data = {
+            "fetched_at": "2026-10-07T13:00:00",
+            "monthly": {"pick_date": "Updated October 1", "rows": []},
+            "weekly": {"pick_date": "Updated on Oct 2, 2026", "kind": "watchlist", "rows": [
+                {"symbol": "TEAM", "company": "Atlassian", "current_price": "$196.50", "signal_price": "$187.63",
+                 "signal_date": "2026-10-05", "signal_at": "2026-10-05T13:30:00Z", "watch_reason": "Gaining on its sector"},
+            ]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = picks_excel.write_report(Path(tmp) / "r.xlsx", data)
+            ws = load_workbook(path)["Weekly Watchlist"]
+            cols = {cell.value: cell.column for cell in ws[picks_excel.HEADER_ROW]}
+            r = picks_excel.FIRST_DATA_ROW
+            self.assertEqual(ws.cell(r, cols["Signal Price"]).value, 187.63)
+            self.assertEqual(ws.cell(r, cols["Signal Date"]).value, datetime(2026, 10, 5))
+            self.assertAlmostEqual(ws.cell(r, cols["Since Signal"]).value, 196.50 / 187.63 - 1)
+            self.assertEqual(ws.cell(r, cols["Why Selected"]).value, "Gaining on its sector")

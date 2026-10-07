@@ -55,14 +55,14 @@ def main():
         page = ctx.new_page()
         ensure_login(page, env)
         pages = [
-            ('dashboard', f'{BASE}/dashboard'),
-            ('monthly', f'{BASE}/dashboard/quantgt-picks'),
-            ('weekly', f'{BASE}/dashboard/weekly-picks'),
-            ('tradingview_indicator', f'{BASE}/dashboard/tradingview-indicator'),
-            ('ai_winners', f'{BASE}/dashboard/who-is-winning-ai'),
-            ('rrg', f'{BASE}/dashboard/rrg'),
-            ('market_tools', f'{BASE}/dashboard/market-tools'),
-            ('study_guide', f'{BASE}/dashboard/study-guide'),
+            ('dashboard', f'{BASE}/quantgt-picks'),
+            ('monthly', f'{BASE}/quantgt-picks'),
+            ('weekly', f'{BASE}/weekly-picks'),
+            ('tradingview_indicator', f'{BASE}/tradingview-indicator'),
+            ('ai_winners', f'{BASE}/who-is-winning-ai'),
+            ('rrg', f'{BASE}/rrg'),
+            ('market_tools', f'{BASE}/market-tools'),
+            ('study_guide', f'{BASE}/learn'),
         ]
         collected = []
         screenshots = {}

@@ -57,13 +57,13 @@ class SubjectTests(unittest.TestCase):
         new = snapshot([], [row("U", analyst_signal="Strong Buy +0.60")])
         self.assertEqual(
             picks_email.build_subject(compare(old, new), new),
-            "Quant GT · Analyst signal: U Sell -0.20 → Strong Buy +0.60",
+            "Quant GT · Analyst consensus: U Sell -0.20 → Strong Buy +0.60",
         )
 
     def test_same_signal_change_in_both_lists_counts_once(self):
         old = snapshot([row("U", analyst_signal="Sell -0.20")], [row("U", analyst_signal="Sell -0.20"), row("V", analyst_signal="Buy +0.10")])
         new = snapshot([row("U", analyst_signal="Buy +0.60")], [row("U", analyst_signal="Buy +0.60"), row("V", analyst_signal="Buy +0.90")])
-        self.assertEqual(picks_email.build_subject(compare(old, new), new), "Quant GT · Analyst signal changes: U, V")
+        self.assertEqual(picks_email.build_subject(compare(old, new), new), "Quant GT · Analyst consensus changes: U, V")
 
     def test_date_only_refresh(self):
         old = snapshot([row("A")], [row("B")], weekly_date="Updated on Sep 25, 2026")
@@ -161,3 +161,42 @@ class FormatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchlistContextTests(unittest.TestCase):
+    def _row(self, **extra):
+        base = row("TEAM", current_price="$196.50", signal_price="$187.63", signal_date="2026-10-05",
+                   signal_at="2026-10-05T13:30:00Z", watch_reason="Gaining on its sector")
+        base.update(extra)
+        return base
+
+    def test_since_signal_waits_for_the_signal_time(self):
+        from datetime import datetime, timezone
+        from quantcheck.picks_format import since_signal
+        r = self._row()
+        self.assertIsNone(since_signal(r, datetime(2026, 10, 4, 16, 0, tzinfo=timezone.utc)))
+        self.assertAlmostEqual(since_signal(r, datetime(2026, 10, 7, 13, 0, tzinfo=timezone.utc)), 196.50 / 187.63 - 1)
+        self.assertIsNone(since_signal(self._row(signal_price="")))
+
+    def test_watchlist_rows_show_reason_and_move_after_signal(self):
+        data = snapshot([], [self._row()])
+        data["fetched_at"] = "2026-10-07T13:00:00"
+        html = picks_email.build_html(data, None)
+        self.assertIn("Gaining on its sector", html)
+        self.assertIn("+4.7%", html)
+        self.assertIn("since Oct 5", html)
+        text = picks_email.build_text(data, None)
+        self.assertIn("+4.7% since Oct 5", text)
+        self.assertIn("Gaining on its sector", text)
+
+    def test_weekend_detection_before_signal_shows_no_move(self):
+        data = snapshot([], [self._row()])
+        data["fetched_at"] = "2026-10-04T16:00:00"
+        html = picks_email.build_html(data, None)
+        self.assertNotIn("since Oct 5", html)
+        self.assertIn("Gaining on its sector", html)
+
+    def test_watchlist_context_fields_never_trigger_alerts(self):
+        old = snapshot([], [self._row(signal_price="$180.00", watch_reason="", signal_at="", signal_date="")])
+        new = snapshot([], [self._row()])
+        self.assertFalse(compare(old, new)["changed"])

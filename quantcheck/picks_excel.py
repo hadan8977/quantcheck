@@ -41,6 +41,7 @@ from quantcheck.picks_format import (
     parse_signal,
     rows_by_symbol,
     section_title,
+    since_signal,
     stock_count,
     NY,
 )
@@ -79,6 +80,10 @@ def _signal_score(value: Any) -> Any:
     return parse_signal(value)[1]
 
 
+def _number(value: Any) -> Any:
+    return value if isinstance(value, (int, float)) else None
+
+
 # (header, field, parser, number_format, width, align)
 Column = tuple[str, str, Callable[[Any], Any], str | None, float, str]
 
@@ -86,13 +91,13 @@ PORTFOLIO_COLUMNS: List[Column] = [
     ("Symbol", "symbol", str, None, 10, "left"),
     ("Company", "company", str, None, 30, "left"),
     ("Sector", "sector", str, None, 22, "left"),
-    ("Held Since", "held_since", parse_date, FMT_DATE, 13, "center"),
+    ("Entry Date", "held_since", parse_date, FMT_DATE, 13, "center"),
     ("Entry Price", "buy_or_entry_price", parse_money, FMT_MONEY, 12, "right"),
     ("Price", "current_price", parse_money, FMT_MONEY, 12, "right"),
     ("Return", "return", parse_pct, FMT_PCT, 11, "right"),
     ("GT Score", "gt_score", parse_gt_score, FMT_GT, 10, "center"),
-    ("Analyst Signal", "analyst_signal", _signal_label, None, 14, "left"),
-    ("Signal Score", "analyst_signal", _signal_score, FMT_SCORE, 12, "right"),
+    ("Analyst Consensus", "analyst_signal", _signal_label, None, 16, "left"),
+    ("Consensus Score", "analyst_signal", _signal_score, FMT_SCORE, 14, "right"),
     ("Next Earnings", "next_earnings", parse_date, FMT_DATE, 14, "center"),
     ("Market Cap", "market_cap", parse_money, FMT_CAP, 13, "right"),
     ("Revenue (TTM)", "revenue_ttm", parse_money, FMT_CAP, 14, "right"),
@@ -107,8 +112,12 @@ WEEKLY_COLUMNS: List[Column] = [
     ("GT Score", "gt_score", parse_gt_score, FMT_GT, 10, "center"),
     ("Price", "current_price", parse_money, FMT_MONEY, 12, "right"),
     ("Buy Price", "buy_or_entry_price", parse_money, FMT_MONEY, 12, "right"),
-    ("Analyst Signal", "analyst_signal", _signal_label, None, 14, "left"),
-    ("Signal Score", "analyst_signal", _signal_score, FMT_SCORE, 12, "right"),
+    ("Signal Date", "signal_date", parse_date, FMT_DATE, 13, "center"),
+    ("Signal Price", "signal_price", parse_money, FMT_MONEY, 12, "right"),
+    ("Since Signal", "_since_signal", _number, FMT_PCT, 12, "right"),
+    ("Why Selected", "watch_reason", str, None, 24, "left"),
+    ("Analyst Consensus", "analyst_signal", _signal_label, None, 16, "left"),
+    ("Consensus Score", "analyst_signal", _signal_score, FMT_SCORE, 14, "right"),
     ("Next Earnings", "next_earnings", parse_date, FMT_DATE, 14, "center"),
     ("Market Cap", "market_cap", parse_money, FMT_CAP, 13, "right"),
     ("Revenue (TTM)", "revenue_ttm", parse_money, FMT_CAP, 14, "right"),
@@ -182,7 +191,8 @@ def _report_date(data: Dict[str, Any]) -> date:
 
 def _write_picks_sheet(wb, key: str, data: Dict[str, Any], diff: Dict[str, Any] | None) -> None:
     section = data.get(key) or {}
-    rows = section.get("rows") or []
+    as_of = fetched_at_utc(data)
+    rows = [{**row, "_since_signal": since_signal(row, as_of)} for row in section.get("rows") or []]
     title = section_title(key, section)
     columns = PORTFOLIO_COLUMNS if key == "monthly" else WEEKLY_COLUMNS
     # Drop columns Quant GT left empty for every row (e.g. watchlist Buy Price).
@@ -271,7 +281,7 @@ def _write_overview(ws, data: Dict[str, Any], diff: Dict[str, Any] | None) -> No
     top = 10
     blocks = [
         ("monthly", 1, [("Symbol", "symbol", str, None), ("Company", "company", str, None), ("Return", "return", parse_pct, FMT_PCT), ("GT Score", "gt_score", parse_gt_score, FMT_GT)]),
-        ("weekly", 6, [("Symbol", "symbol", str, None), ("Company", "company", str, None), ("GT Score", "gt_score", parse_gt_score, FMT_GT), ("Signal", "analyst_signal", str, None)]),
+        ("weekly", 6, [("Symbol", "symbol", str, None), ("Company", "company", str, None), ("GT Score", "gt_score", parse_gt_score, FMT_GT), ("Consensus", "analyst_signal", str, None)]),
     ]
     for key, start_col, cols in blocks:
         section = data.get(key) or {}

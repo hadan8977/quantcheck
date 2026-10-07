@@ -165,7 +165,7 @@ def wait_for_parsable_picks_rows(page, mode: str, attempts: int = 3, timeout: in
 def login(page):
     # Prefer the existing authenticated session and only fall back to manual login
     # when the page genuinely lacks usable picks content.
-    page.goto(f"{BASE}/dashboard/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
+    page.goto(f"{BASE}/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
     try:
         page.wait_for_load_state("load", timeout=15000)
     except PlaywrightTimeoutError:
@@ -173,7 +173,7 @@ def login(page):
     page.wait_for_timeout(2500)
     if has_auth_session(page) and has_picks_content(page) and not is_login_prompt_visible(page):
         return
-    page.goto(f"{BASE}/login?redirect=/dashboard/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
+    page.goto(f"{BASE}/login?redirect=/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
     try:
         page.wait_for_load_state("load", timeout=15000)
     except PlaywrightTimeoutError:
@@ -191,7 +191,7 @@ def login(page):
     except PlaywrightTimeoutError:
         pass
     page.wait_for_timeout(3000)
-    page.goto(f"{BASE}/dashboard/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
+    page.goto(f"{BASE}/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
     try:
         page.wait_for_load_state("load", timeout=15000)
     except PlaywrightTimeoutError:
@@ -373,6 +373,13 @@ def merge_watchlist_api_scores(rows: List[Dict[str, Any]], api_rows: List[Dict[s
             row["company"] = clean_text(item.get("name"))
         if not row.get("sector") and item.get("sector"):
             row["sector"] = clean_text(item.get("sector"))
+        # `price` is the price at this week's signal (`signal_ts`); `sell_price`
+        # is the live price (it matches the Portfolio page's current prices).
+        if isinstance(item.get("price"), (int, float)):
+            row["signal_price"] = f"${item['price']:,.2f}"
+        if item.get("signal_ts"):
+            row["signal_at"] = str(item["signal_ts"])
+            row["signal_date"] = str(item["signal_ts"])[:10]
         if not row.get("current_price"):
             api_price = item.get("sell_price")
             if api_price is None:
@@ -398,6 +405,40 @@ def fetch_watchlist_api_rows(page) -> List[Dict[str, Any]]:
     rows = (payload or {}).get("body")
     if status != 200 or not isinstance(rows, list) or not rows:
         raise RuntimeError(f"watchlist API did not return member rows: status={status}")
+    return rows
+
+
+def attach_digest_reasons(page, rows: List[Dict[str, Any]], api_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Best effort: add the Weekly Digest's one-line reason ("At a 52-week high")
+    to each watchlist row. Only used when the digest is for the same week as the
+    watchlist; any failure leaves rows untouched -- this is display context and
+    must never break the picks scrape."""
+    try:
+        payload = page.evaluate(
+            """async () => {
+              const response = await fetch('/api/proxy/api/weekly-digest/latest', { credentials: 'same-origin' });
+              let body = null;
+              try { body = await response.json(); } catch (_) {}
+              return { status: response.status, body };
+            }"""
+        )
+        body = (payload or {}).get("body") or {}
+        if int((payload or {}).get("status") or 0) != 200 or not isinstance(body, dict):
+            return rows
+        weeks = {str(item.get("week_start") or "") for item in api_rows}
+        if str(body.get("week_start") or "") not in weeks:
+            return rows
+        reasons = {
+            clean_text(item.get("ticker")).upper(): clean_text(item.get("reason"))
+            for item in ((body.get("sections") or {}).get("watchlist") or [])
+            if isinstance(item, dict) and item.get("ticker") and item.get("reason")
+        }
+        for row in rows:
+            reason = reasons.get(clean_text(row.get("symbol")).upper())
+            if reason:
+                row["watch_reason"] = reason
+    except Exception:
+        return rows
     return rows
 
 
@@ -454,7 +495,7 @@ def fetch():
         page = context.new_page()
         login(page)
 
-        page.goto(f"{BASE}/dashboard/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
+        page.goto(f"{BASE}/quantgt-picks", wait_until="domcontentloaded", timeout=45000)
         try:
             page.wait_for_load_state("load", timeout=15000)
         except PlaywrightTimeoutError:
@@ -468,7 +509,7 @@ def fetch():
         monthly_pick_date = extract_pick_date(monthly_date_text, "monthly")
         monthly_rows = expand_and_attach_details(page, monthly_rows, "monthly")
 
-        page.goto(f"{BASE}/dashboard/weekly-picks", wait_until="domcontentloaded", timeout=45000)
+        page.goto(f"{BASE}/weekly-picks", wait_until="domcontentloaded", timeout=45000)
         try:
             page.wait_for_load_state("load", timeout=15000)
         except PlaywrightTimeoutError:
@@ -481,7 +522,9 @@ def fetch():
         weekly_pick_date = extract_pick_date(main_text, "weekly")
         weekly_kind = "watchlist" if is_watchlist_page(page) or any(row.get("source_kind") == "watchlist" for row in weekly_rows) else "weekly_picks"
         if weekly_kind == "watchlist":
-            weekly_rows = merge_watchlist_api_scores(weekly_rows, fetch_watchlist_api_rows(page))
+            watchlist_api_rows = fetch_watchlist_api_rows(page)
+            weekly_rows = merge_watchlist_api_scores(weekly_rows, watchlist_api_rows)
+            weekly_rows = attach_digest_reasons(page, weekly_rows, watchlist_api_rows)
             weekly_rows = expand_watchlist_and_attach_details(page, weekly_rows)
         else:
             weekly_rows = expand_and_attach_details(page, weekly_rows, "weekly")
@@ -491,7 +534,7 @@ def fetch():
     return {
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "source": BASE,
-        "monthly": {"page": f"{BASE}/dashboard/quantgt-picks", "pick_date": monthly_pick_date, "rows": monthly_rows},
+        "monthly": {"page": f"{BASE}/quantgt-picks", "pick_date": monthly_pick_date, "rows": monthly_rows},
         "weekly": {"page": page.url, "pick_date": weekly_pick_date, "kind": weekly_kind, "rows": weekly_rows},
     }
 

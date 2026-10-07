@@ -251,7 +251,7 @@ def notify(
 
 
 def ensure_login(page, env: Dict[str, str]):
-    page.goto(f'{BASE}/dashboard/quantgt-picks', wait_until='domcontentloaded', timeout=45000)
+    page.goto(f'{BASE}/quantgt-picks', wait_until='domcontentloaded', timeout=45000)
     try:
         page.wait_for_load_state('load', timeout=15000)
     except PlaywrightTimeoutError:
@@ -263,7 +263,7 @@ def ensure_login(page, env: Dict[str, str]):
     password = env.get('QUANTGT_PASSWORD')
     if not email or not password:
         raise RuntimeError('Missing QUANTGT_EMAIL/QUANTGT_PASSWORD in .env')
-    page.goto(f'{BASE}/login?redirect=/dashboard/quantgt-picks', wait_until='domcontentloaded', timeout=45000)
+    page.goto(f'{BASE}/login?redirect=/quantgt-picks', wait_until='domcontentloaded', timeout=45000)
     try:
         page.wait_for_load_state('load', timeout=15000)
     except PlaywrightTimeoutError:
@@ -281,7 +281,7 @@ def ensure_login(page, env: Dict[str, str]):
     except PlaywrightTimeoutError:
         pass
     page.wait_for_timeout(3000)
-    page.goto(f'{BASE}/dashboard/quantgt-picks', wait_until='domcontentloaded', timeout=45000)
+    page.goto(f'{BASE}/quantgt-picks', wait_until='domcontentloaded', timeout=45000)
     try:
         page.wait_for_load_state('load', timeout=15000)
     except PlaywrightTimeoutError:
@@ -358,8 +358,8 @@ def capture_logged_in_screenshots(which: List[str], expected_data: Dict[str, Any
         page = context.new_page()
         ensure_login(page, env)
         targets = {
-            'monthly': f'{BASE}/dashboard/quantgt-picks',
-            'weekly': f'{BASE}/dashboard/weekly-picks',
+            'monthly': f'{BASE}/quantgt-picks',
+            'weekly': f'{BASE}/weekly-picks',
         }
         for name in which:
             page.goto(targets[name], wait_until='domcontentloaded', timeout=45000)

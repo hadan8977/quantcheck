@@ -22,9 +22,9 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 BLANK_VALUES = {"", "—", "-", "–", "n/a", "N/A", "None"}
 
 FIELD_LABELS = {
-    "analyst_signal": "Analyst Signal",
+    "analyst_signal": "Analyst Consensus",
     "gt_score": "GT Score",
-    "held_since": "Held Since",
+    "held_since": "Entry Date",
     "buy_or_entry_price": "Entry Price",
     "current_price": "Price",
     "return": "Return",
@@ -37,6 +37,8 @@ FIELD_LABELS = {
     "pe_ttm": "P/E (TTM)",
     "rating": "Rating",
     "source_kind": "Source",
+    "watch_reason": "Why Selected",
+    "signal_price": "Signal Price",
 }
 
 
@@ -139,6 +141,26 @@ def format_fetched(data: Dict[str, Any]) -> str:
     ny = dt.astimezone(NY)
     bj = dt.astimezone(SHANGHAI)
     return f"{ny:%b} {ny.day}, {ny:%Y} · {ny:%H:%M} ET / {bj:%H:%M} Beijing"
+
+
+def since_signal(row: Dict[str, Any], as_of: datetime | None = None) -> float | None:
+    """Watchlist move from this week's signal price to the current price (fraction).
+
+    The watchlist is usually published at the weekend with a signal time of
+    Monday's open; before that moment there is no move to report, so return
+    None when `as_of` is earlier than the row's `signal_at`.
+    """
+    signal_at = row.get("signal_at")
+    if as_of is not None and signal_at:
+        try:
+            if as_of < datetime.fromisoformat(str(signal_at).replace("Z", "+00:00")):
+                return None
+        except ValueError:
+            pass
+    start, now = parse_money(row.get("signal_price")), parse_money(row.get("current_price"))
+    if not start or now is None:
+        return None
+    return now / start - 1
 
 
 def rows_by_symbol(rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
