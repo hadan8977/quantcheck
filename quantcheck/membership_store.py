@@ -169,17 +169,25 @@ class Member:
         actor: str,
         at: datetime | None = None,
         reason: str | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
-        self.history.append(
-            {
-                "at": _dt_to_str(at or datetime.now(timezone.utc)),
-                "action": action,
-                "months": months,
-                "expires_at": _dt_to_str(expires_at),
-                "actor": actor,
-                "reason": reason,
-            }
-        )
+        """Append a history entry. `extra` merges additional free-form keys
+        (e.g. `payment`, `mode`) into the entry; history entries are free-form
+        dicts, so older readers simply ignore keys they do not know about and
+        older entries without them stay valid.
+        """
+        entry: dict[str, Any] = {
+            "at": _dt_to_str(at or datetime.now(timezone.utc)),
+            "action": action,
+            "months": months,
+            "expires_at": _dt_to_str(expires_at),
+            "actor": actor,
+            "reason": reason,
+        }
+        if extra:
+            for key, value in extra.items():
+                entry.setdefault(key, value)
+        self.history.append(entry)
 
 
 @dataclass

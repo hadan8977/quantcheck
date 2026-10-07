@@ -425,5 +425,23 @@ class ExplicitRootOverridesFrozenModuleRootTests(unittest.TestCase):
         self.assertEqual(result, ["fallback@example.com"])
 
 
+
+class PaymentHistoryDoesNotAffectFilteringTests(MembershipFilterTestCase):
+    """History entries gained free-form `payment`/`mode` keys; routing must
+    be unaffected, and unknown/odd history must never break fail-open.
+    """
+
+    def test_member_with_payment_history_is_filtered_normally(self):
+        self.write_subscribers("paid@example.com", "lapsed@example.com", "unknown@example.com")
+        paid = _member("paid@example.com", expires_at=datetime(2099, 1, 1, tzinfo=UTC))
+        paid.add_history(action="add", months=None, expires_at=paid.expires_at, actor="t", extra={"mode": "align", "payment": {"amount": 9, "currency": "CNY"}})
+        paid.add_history(action="payment", months=None, expires_at=paid.expires_at, actor="t", extra={"payment": {"amount": 1}})
+        lapsed = _member("lapsed@example.com", expires_at=datetime(2020, 1, 1, tzinfo=UTC))
+        lapsed.add_history(action="payment", months=None, expires_at=lapsed.expires_at, actor="t", extra={"payment": {"amount": 1}})
+        self.write_store([paid, lapsed])
+
+        self.assertEqual(subscriber_recipients(self.base_env()), ["paid@example.com", "unknown@example.com"])
+
+
 if __name__ == "__main__":
     unittest.main()

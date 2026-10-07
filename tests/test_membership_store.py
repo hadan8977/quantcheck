@@ -271,5 +271,64 @@ class MembershipStoreCrudTests(unittest.TestCase):
         self.assertEqual(entry["at"], "2026-01-01T00:00:00+00:00")
 
 
+
+# A store exactly as written by the code that predates payments / expiry
+# modes: no `payment` or `mode` keys anywhere in history.
+OLD_FORMAT_STORE = {
+    "version": 1,
+    "timezone": "America/New_York",
+    "members": [
+        {
+            "email": "old@example.com",
+            "status": "active",
+            "joined_at": "2026-08-31T08:38:54.315975-04:00",
+            "expires_at": "2026-11-01T00:00:00-04:00",
+            "months_total": 0,
+            "note": "migrated from notify_recipients.txt on 2026-08-31",
+            "history": [
+                {"at": "2026-08-31T08:38:54.315975-04:00", "action": "migrate", "months": None, "expires_at": "2026-11-01T00:00:00-04:00", "actor": "migration", "reason": None}
+            ],
+        }
+    ],
+}
+
+
+class PaymentFieldCompatibilityTests(unittest.TestCase):
+    def test_store_written_by_old_code_still_loads_and_services_read_it(self):
+        from quantcheck.service import members as svc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            (root / ".env").write_text(f"QUANTCHECK_HOME={root}\n", encoding="utf-8")
+            path = default_path(root)
+            path.write_text(json.dumps(OLD_FORMAT_STORE), encoding="utf-8")
+
+            store = load_store(path)
+            self.assertEqual(store.members[0].history[0]["action"], "migrate")
+
+            detail = svc.get_member("old@example.com", root=root)["member"]
+            self.assertEqual((detail["payments"], detail["total_paid"]), ([], {}))
+            self.assertEqual(svc.payments_report(root=root)["count"], 0)
+
+    def test_new_history_keys_are_additive_and_do_not_change_top_level_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memberships.json"
+            path.write_text(json.dumps(OLD_FORMAT_STORE), encoding="utf-8")
+            store = load_store(path)
+            member = store.members[0]
+            member.add_history(
+                action="payment", months=None, expires_at=member.expires_at, actor="t", extra={"payment": {"amount": 5}, "mode": "x", "action": "ignored"}
+            )
+            save_store(store, backup=False)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(set(raw), {"version", "timezone", "members"})
+            self.assertEqual(set(raw["members"][0]), set(OLD_FORMAT_STORE["members"][0]))
+            entry = raw["members"][0]["history"][-1]
+            self.assertEqual(entry["action"], "payment")  # extra can never overwrite core keys
+            self.assertEqual(entry["payment"], {"amount": 5})
+            self.assertEqual(load_store(path).members[0].history[-1]["mode"], "x")
+
+
 if __name__ == "__main__":
     unittest.main()

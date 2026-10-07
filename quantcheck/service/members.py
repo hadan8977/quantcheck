@@ -7,10 +7,13 @@ dict returns, no printing, ServiceError on expected failure.
 
 from __future__ import annotations
 
+import re
 import shutil
+from collections import Counter
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from quantcheck import membership
 from quantcheck import membership_store
@@ -20,6 +23,8 @@ from quantcheck.membership_store import Member, MembershipStore
 from quantcheck.service.errors import ServiceError
 
 VALID_STATUS_FILTERS = ("active", "expired", "cancelled", "legacy")
+PAYMENT_KEYS = ("amount", "currency", "channel", "paid_at", "ref")
+UNSPECIFIED = "unspecified"
 
 
 def _context(root: Path | str | None) -> tuple[Path, dict]:
@@ -97,6 +102,163 @@ def _member_detail(member: Member, now: datetime) -> dict[str, Any]:
     return data
 
 
+# ---------------------------------------------------------------------------
+# Argument helpers: expiry mode, payments, pasted email lists
+# ---------------------------------------------------------------------------
+
+
+_EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
+
+
+def parse_email_list(source: str | Iterable[str] | None) -> list[str]:
+    """Split a messy pasted blob into raw tokens.
+
+    Separators are any whitespace, commas, semicolons and newlines; everything
+    from a `#` to the end of its line is a comment and ignored. Tokens are
+    returned as written (order preserved, no lowercasing, no validation, no
+    de-duplication) so callers can report invalid ones back verbatim.
+    """
+    if source is None:
+        return []
+    chunks = [source] if isinstance(source, str) else [str(item) for item in source]
+    tokens: list[str] = []
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            body = line.split("#", 1)[0]
+            tokens.extend(token for token in _EMAIL_SPLIT_RE.split(body) if token)
+    return tokens
+
+
+def _plan_expiry_mode(months: int | None, expires_at: str | None, align: bool) -> str:
+    chosen = [name for name, given in (("months", months is not None), ("expires_at", expires_at is not None), ("align", bool(align))) if given]
+    if len(chosen) != 1:
+        raise ServiceError(
+            "invalid_arguments",
+            "exactly one of months, expires_at, align=True must be given" + (f" (got: {', '.join(chosen)})" if chosen else " (got none)"),
+            {"given": chosen},
+        )
+    return chosen[0]
+
+
+def _check_months(months: Any) -> int:
+    if not isinstance(months, int) or isinstance(months, bool) or months < 1:
+        raise ServiceError("invalid_months", f"months must be a positive integer, got {months!r}", {"months": months})
+    return months
+
+
+def _parse_concrete_expiry(expires_at: str | None, *, field_name: str = "expires_at") -> datetime:
+    parsed = _parse_optional_dt(expires_at, field_name=field_name)
+    if parsed is None:
+        raise ServiceError("invalid_expiry", f"{field_name} must be a concrete date or datetime, not null", {field_name: expires_at})
+    return parsed
+
+
+def _most_common_active_expiry(store: MembershipStore, now: datetime) -> datetime:
+    """The most common `expires_at` among currently-active members (ties go to the later date)."""
+    counts: Counter[datetime] = Counter(
+        m.expires_at for m in store.members if m.expires_at is not None and m.effective_status(now) == "active"
+    )
+    if not counts:
+        raise ServiceError("no_active_members", "align requires at least one currently-active member with an expiry to copy")
+    best = max(counts.values())
+    return max(expiry for expiry, count in counts.items() if count == best)
+
+
+def _resolve_new_member_expiry(
+    mode: str, months: int | None, expires_at: str | None, joined_dt: datetime, store: MembershipStore, now: datetime
+) -> datetime:
+    if mode == "months":
+        return membership.expiry_for_new_member(joined_dt, _check_months(months))
+    if mode == "expires_at":
+        return _parse_concrete_expiry(expires_at)
+    return _most_common_active_expiry(store, now)
+
+
+def _normalize_payment(payment: Mapping[str, Any] | None, now: datetime) -> dict[str, Any] | None:
+    """Validate a payment dict and return the canonical stored form
+    (`amount`, `currency`, `channel`, `paid_at`, `ref`; absent optionals are None).
+    """
+    if payment is None:
+        return None
+    if not isinstance(payment, Mapping):
+        raise ServiceError("invalid_payment", "payment must be an object/dict", {"payment": str(payment)})
+    unknown = sorted(set(payment) - set(PAYMENT_KEYS))
+    if unknown:
+        raise ServiceError("invalid_payment", f"unknown payment fields: {unknown}", {"unknown": unknown})
+    raw_amount = payment.get("amount")
+    if raw_amount is None or isinstance(raw_amount, bool):
+        raise ServiceError("invalid_payment", "payment.amount is required and must be a number", {"amount": raw_amount})
+    try:
+        amount = Decimal(str(raw_amount).strip())
+    except InvalidOperation as exc:
+        raise ServiceError("invalid_payment", f"payment.amount must be a number, got {raw_amount!r}", {"amount": raw_amount}) from exc
+    if not amount.is_finite() or amount <= 0:
+        raise ServiceError("invalid_payment", f"payment.amount must be a positive finite number, got {raw_amount!r}", {"amount": raw_amount})
+    stored_amount: int | float = int(amount) if amount == amount.to_integral_value() else float(amount)
+
+    def _optional_text(key: str, transform) -> str | None:
+        value = payment.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ServiceError("invalid_payment", f"payment.{key} must be a string", {key: value})
+        text = value.strip()
+        return transform(text) if text else None
+
+    paid_at_raw = payment.get("paid_at")
+    paid_at = _parse_optional_dt(paid_at_raw, field_name="payment.paid_at") if paid_at_raw not in (None, "") else None
+    return {
+        "amount": stored_amount,
+        "currency": _optional_text("currency", str.upper),
+        "channel": _optional_text("channel", str.lower),
+        "paid_at": (paid_at or now).isoformat(),
+        "ref": _optional_text("ref", str),
+    }
+
+
+def build_payment(
+    amount: Any = None, currency: str | None = None, channel: str | None = None, paid_at: str | None = None, ref: str | None = None
+) -> dict[str, Any] | None:
+    """Convenience for front ends: assemble a payment dict from flat fields, or None if nothing was given."""
+    fields = {"amount": amount, "currency": currency, "channel": channel, "paid_at": paid_at, "ref": ref}
+    given = {key: value for key, value in fields.items() if value is not None}
+    return given or None
+
+
+def _payment_entries(member: Member) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for item in member.history:
+        if not isinstance(item, dict) or not isinstance(item.get("payment"), dict):
+            continue
+        payment = item["payment"]
+        entries.append(
+            {
+                "email": member.email,
+                "paid_at": payment.get("paid_at") or item.get("at"),
+                "amount": payment.get("amount"),
+                "currency": payment.get("currency"),
+                "channel": payment.get("channel"),
+                "ref": payment.get("ref"),
+                "action": item.get("action"),
+                "at": item.get("at"),
+            }
+        )
+    return entries
+
+
+def _sum_amounts(rows: Iterable[tuple[str, Any]]) -> dict[str, int | float]:
+    totals: dict[str, Decimal] = {}
+    for key, amount in rows:
+        try:
+            value = Decimal(str(amount))
+        except InvalidOperation:
+            continue
+        if not value.is_finite():
+            continue
+        totals[key] = totals.get(key, Decimal(0)) + value
+    return {key: (int(v) if v == v.to_integral_value() else float(v)) for key, v in sorted(totals.items())}
+
+
 def _add_to_recipients_file(root: Path, env: Mapping[str, str], email: str) -> dict[str, Any]:
     recipient_file = recipients.load_recipient_file(env, "subscriber", root)
     if email in set(recipient_file.entries):
@@ -113,6 +275,20 @@ def _remove_from_recipients_file(root: Path, env: Mapping[str, str], email: str)
     entries = [existing for existing in recipient_file.entries if existing != email]
     backup_path = recipients.write_recipient_file(recipient_file, entries)
     return {"changed": True, "path": str(recipient_file.path), "backup": str(backup_path) if backup_path else None}
+
+
+def _add_many_to_recipients_file(root: Path, env: Mapping[str, str], emails: Sequence[str], *, dry_run: bool = False) -> dict[str, Any]:
+    """Batch version of `_add_to_recipients_file`: at most one file write for all of `emails`."""
+    recipient_file = recipients.load_recipient_file(env, "subscriber", root)
+    existing = set(recipient_file.entries)
+    to_add = [email for email in recipients.unique_emails(emails) if email not in existing]
+    result: dict[str, Any] = {"changed": False, "path": str(recipient_file.path), "added": to_add}
+    if not to_add or dry_run:
+        return result
+    entries = recipients.unique_emails([*recipient_file.entries, *to_add])
+    backup_path = recipients.write_recipient_file(recipient_file, entries)
+    result.update({"changed": True, "backup": str(backup_path) if backup_path else None})
+    return result
 
 
 def list_members(status: str | None = None, expiring_within_days: int | None = None, *, root: Path | str | None = None) -> dict[str, Any]:
@@ -144,22 +320,50 @@ def get_member(email: str, *, root: Path | str | None = None) -> dict[str, Any]:
     member = store.find(normalized)
     if member is None:
         raise ServiceError("member_not_found", f"no member found for {normalized}", {"email": normalized})
-    return {"member": _member_detail(member, now)}
+    detail = _member_detail(member, now)
+    payments = _payment_entries(member)
+    detail["payments"] = payments
+    detail["total_paid"] = _sum_amounts((p["currency"] or UNSPECIFIED, p["amount"]) for p in payments)
+    return {"member": detail}
 
 
-def add_member(email: str, months: int, note: str | None = None, joined_at: str | None = None, *, root: Path | str | None = None) -> dict[str, Any]:
+def add_member(
+    email: str,
+    months: int | None = None,
+    note: str | None = None,
+    joined_at: str | None = None,
+    *,
+    expires_at: str | None = None,
+    align: bool = False,
+    payment: Mapping[str, Any] | None = None,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Create a new member. Exactly one of `months` (next-anchor arithmetic),
+    `expires_at` (explicit date) or `align=True` (copy the most common expiry
+    among active members) chooses the expiry.
+    """
     resolved_root, env = _context(root)
     normalized = _validate_email(email)
+    mode = _plan_expiry_mode(months, expires_at, align)
     now = _now()
     joined_dt = _parse_optional_dt(joined_at, field_name="joined_at") or now
+    normalized_payment = _normalize_payment(payment, now)
 
     store = _load_store(resolved_root, env)
     if store.find(normalized) is not None:
         raise ServiceError("member_already_exists", f"{normalized} is already a member; use extend_member to add months", {"email": normalized})
 
-    expires_at = membership.expiry_for_new_member(joined_dt, months)
-    member = Member(email=normalized, status="active", joined_at=joined_dt, expires_at=expires_at, months_total=months, note=note or "")
-    member.add_history(action="add", months=months, expires_at=expires_at, actor="service.add_member", at=now)
+    new_expiry = _resolve_new_member_expiry(mode, months, expires_at, joined_dt, store, now)
+    months_total = months if mode == "months" else 0
+    member = Member(email=normalized, status="active", joined_at=joined_dt, expires_at=new_expiry, months_total=months_total, note=note or "")
+    member.add_history(
+        action="add",
+        months=months if mode == "months" else None,
+        expires_at=new_expiry,
+        actor="service.add_member",
+        at=now,
+        extra=_history_extra(mode, normalized_payment),
+    )
     store.upsert(member)
     store_backup = _save_store(store)
 
@@ -167,16 +371,17 @@ def add_member(email: str, months: int, note: str | None = None, joined_at: str 
     return {"member": _member_detail(member, now), "recipients_file": recipients_result, "store_backup": store_backup}
 
 
-def extend_member(email: str, months: int, note: str | None = None, *, root: Path | str | None = None) -> dict[str, Any]:
-    resolved_root, env = _context(root)
-    normalized = _validate_email(email)
-    now = _now()
+def _history_extra(mode: str | None, payment: dict[str, Any] | None) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    if mode is not None:
+        extra["mode"] = mode
+    if payment is not None:
+        extra["payment"] = payment
+    return extra
 
-    store = _load_store(resolved_root, env)
-    member = store.find(normalized)
-    if member is None:
-        raise ServiceError("member_not_found", f"no member found for {normalized}; use add_member to create one", {"email": normalized})
 
+def _apply_extend(member: Member, months: int, note: str | None, now: datetime, payment: dict[str, Any] | None, actor: str) -> datetime:
+    """Shared by extend_member and bulk_extend: mutates `member` in memory only."""
     new_expiry = membership.extend_expiry(member.expires_at, months, now)
     member.expires_at = new_expiry
     member.months_total = (member.months_total or 0) + months
@@ -187,7 +392,30 @@ def extend_member(email: str, months: int, note: str | None = None, *, root: Pat
         member.status = "active"
     if note is not None:
         member.note = note
-    member.add_history(action="extend", months=months, expires_at=new_expiry, actor="service.extend_member", at=now)
+    member.add_history(action="extend", months=months, expires_at=new_expiry, actor=actor, at=now, extra=_history_extra(None, payment))
+    return new_expiry
+
+
+def extend_member(
+    email: str,
+    months: int,
+    note: str | None = None,
+    *,
+    payment: Mapping[str, Any] | None = None,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    resolved_root, env = _context(root)
+    normalized = _validate_email(email)
+    now = _now()
+    months = _check_months(months)
+    normalized_payment = _normalize_payment(payment, now)
+
+    store = _load_store(resolved_root, env)
+    member = store.find(normalized)
+    if member is None:
+        raise ServiceError("member_not_found", f"no member found for {normalized}; use add_member to create one", {"email": normalized})
+
+    _apply_extend(member, months, note, now, normalized_payment, "service.extend_member")
     store.upsert(member)
     store_backup = _save_store(store)
 
@@ -195,6 +423,12 @@ def extend_member(email: str, months: int, note: str | None = None, *, root: Pat
     # taken them out; a no-op otherwise.
     recipients_result = _add_to_recipients_file(resolved_root, env, normalized)
     return {"member": _member_detail(member, now), "recipients_file": recipients_result, "store_backup": store_backup}
+
+
+def _apply_set_expiry(member: Member, new_expiry: datetime | None, note: str, now: datetime, actor: str) -> None:
+    """Shared by set_expiry and bulk_set_expiry: mutates `member` in memory only."""
+    member.expires_at = new_expiry
+    member.add_history(action="set_expiry", months=None, expires_at=new_expiry, actor=actor, at=now, reason=note)
 
 
 def set_expiry(email: str, expires_at: str | None, note: str, *, root: Path | str | None = None) -> dict[str, Any]:
@@ -213,8 +447,7 @@ def set_expiry(email: str, expires_at: str | None, note: str, *, root: Path | st
         raise ServiceError("member_not_found", f"no member found for {normalized}", {"email": normalized})
 
     new_expiry = _parse_optional_dt(expires_at, field_name="expires_at")
-    member.expires_at = new_expiry
-    member.add_history(action="set_expiry", months=None, expires_at=new_expiry, actor="service.set_expiry", at=now, reason=note)
+    _apply_set_expiry(member, new_expiry, note, now, "service.set_expiry")
     store.upsert(member)
     store_backup = _save_store(store)
     return {"member": _member_detail(member, now), "store_backup": store_backup}
@@ -356,3 +589,316 @@ def migrate_from_recipients(expires_at: str, note: str, dry_run: bool = True, *,
         }
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Payments
+# ---------------------------------------------------------------------------
+
+
+def record_payment(
+    email: str,
+    amount: Any,
+    currency: str | None = None,
+    channel: str | None = None,
+    paid_at: str | None = None,
+    ref: str | None = None,
+    note: str | None = None,
+    *,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Append a `payment` history entry. Never changes expiry, status,
+    months_total, the note field, or notify_recipients.txt -- it only records
+    money received (use extend_member / add_member to also grant time).
+    """
+    resolved_root, env = _context(root)
+    normalized = _validate_email(email)
+    now = _now()
+    normalized_payment = _normalize_payment({"amount": amount, "currency": currency, "channel": channel, "paid_at": paid_at, "ref": ref}, now)
+
+    store = _load_store(resolved_root, env)
+    member = store.find(normalized)
+    if member is None:
+        raise ServiceError("member_not_found", f"no member found for {normalized}", {"email": normalized})
+
+    member.add_history(
+        action="payment",
+        months=None,
+        expires_at=member.expires_at,
+        actor="service.record_payment",
+        at=now,
+        reason=note,
+        extra={"payment": normalized_payment},
+    )
+    store.upsert(member)
+    store_backup = _save_store(store)
+    detail = get_member(normalized, root=resolved_root)["member"]
+    return {"member": detail, "payment": normalized_payment, "store_backup": store_backup}
+
+
+def payments_report(since: str | None = None, until: str | None = None, *, root: Path | str | None = None) -> dict[str, Any]:
+    """All recorded payments, optionally filtered on `paid_at` (`since`
+    inclusive; a bare-date `until` includes that whole day), with totals by
+    currency and by channel (channel -> currency -> sum). Read-only.
+    """
+    resolved_root, env = _context(root)
+    since_dt = _parse_optional_dt(since, field_name="since")
+    until_dt = _parse_optional_dt(until, field_name="until")
+    until_exclusive = False
+    if until_dt is not None and len(str(until).strip()) <= 10:
+        until_dt = until_dt + timedelta(days=1)
+        until_exclusive = True
+
+    store = _load_store(resolved_root, env)
+    rows: list[tuple[datetime | None, dict[str, Any]]] = []
+    for member in store.members:
+        for entry in _payment_entries(member):
+            try:
+                paid = _parse_optional_dt(entry["paid_at"], field_name="paid_at") if entry["paid_at"] else None
+            except ServiceError:
+                paid = None
+            if since_dt is not None and (paid is None or paid < since_dt):
+                continue
+            if until_dt is not None and (paid is None or paid > until_dt or (until_exclusive and paid == until_dt)):
+                continue
+            rows.append((paid, entry))
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    rows.sort(key=lambda row: (row[0] or floor, row[1]["email"]))
+    payments = [{key: value for key, value in entry.items() if key != "at"} for _, entry in rows]
+
+    by_channel: dict[str, dict[str, int | float]] = {}
+    for channel in sorted({p["channel"] or UNSPECIFIED for p in payments}):
+        by_channel[channel] = _sum_amounts((p["currency"] or UNSPECIFIED, p["amount"]) for p in payments if (p["channel"] or UNSPECIFIED) == channel)
+    return {
+        "since": since_dt.isoformat() if since_dt else None,
+        "until": until,
+        "count": len(payments),
+        "totals_by_currency": _sum_amounts((p["currency"] or UNSPECIFIED, p["amount"]) for p in payments),
+        "totals_by_channel": by_channel,
+        "payments": payments,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bulk operations (dry-run by default; load once, save once, one recipients write)
+# ---------------------------------------------------------------------------
+
+
+def _coerce_emails(emails: str | Iterable[str] | None) -> list[str]:
+    return parse_email_list(emails)
+
+
+def _bulk_result(email: str, outcome: str, code: str | None = None, message: str | None = None, **extra: Any) -> dict[str, Any]:
+    return {"email": email, "outcome": outcome, "code": code, "message": message, **extra}
+
+
+def _bulk_summary(
+    dry_run: bool, requested: int, duplicates: int, results: list[dict[str, Any]], recipients_result: dict[str, Any] | None, store_backup: str | None, **extra: Any
+) -> dict[str, Any]:
+    skipped = [r for r in results if r["outcome"] == "skipped"]
+    by_code = dict(sorted(Counter(r["code"] for r in skipped).items()))
+    return {
+        "dry_run": dry_run,
+        **extra,
+        "counts": {
+            "requested": requested,
+            "duplicates_ignored": duplicates,
+            "ok": len(results) - len(skipped),
+            "skipped": len(skipped),
+            "skipped_by_code": by_code,
+        },
+        "results": results,
+        "recipients_file": recipients_result,
+        "store_backup": store_backup,
+    }
+
+
+def _dedupe_tokens(tokens: Sequence[str]) -> tuple[list[tuple[str, str | None]], int]:
+    """-> ([(token_or_normalized_email, normalized_or_None_if_invalid)], duplicates_ignored)"""
+    seen: set[str] = set()
+    out: list[tuple[str, str | None]] = []
+    duplicates = 0
+    for token in tokens:
+        normalized = recipients.normalize_email(token)
+        if not normalized or not recipients.is_valid_email(normalized):
+            key = f"invalid:{token}"
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            out.append((token, None))
+            continue
+        if normalized in seen:
+            duplicates += 1
+            continue
+        seen.add(normalized)
+        out.append((normalized, normalized))
+    return out, duplicates
+
+
+def bulk_add(
+    emails: str | Iterable[str] | None,
+    months: int | None = None,
+    expires_at: str | None = None,
+    align: bool = False,
+    note: str | None = None,
+    payment: Mapping[str, Any] | None = None,
+    dry_run: bool = True,
+    *,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Add many new members with the same expiry rule (one of months /
+    expires_at / align). Invalid addresses and existing members are reported
+    and skipped. `payment` (if given) is recorded on EVERY added member --
+    amount is per member, not a total. `align` is resolved once, against the
+    store as it was before this call.
+    """
+    resolved_root, env = _context(root)
+    tokens = _coerce_emails(emails)
+    if not tokens:
+        raise ServiceError("invalid_arguments", "emails is empty")
+    mode = _plan_expiry_mode(months, expires_at, align)
+    now = _now()
+    if mode == "months":
+        _check_months(months)
+    normalized_payment = _normalize_payment(payment, now)
+
+    store = _load_store(resolved_root, env)
+    shared_expiry = _resolve_new_member_expiry(mode, months, expires_at, now, store, now)
+    deduped, duplicates = _dedupe_tokens(tokens)
+
+    results: list[dict[str, Any]] = []
+    added: list[str] = []
+    for token, email in deduped:
+        if email is None:
+            results.append(_bulk_result(token, "skipped", "invalid_email", f"invalid email address: {token!r}"))
+            continue
+        if store.find(email) is not None:
+            results.append(_bulk_result(email, "skipped", "already_member", f"{email} is already a member; use bulk_extend"))
+            continue
+        new_expiry = shared_expiry
+        member = Member(email=email, status="active", joined_at=now, expires_at=new_expiry, months_total=months if mode == "months" else 0, note=note or "")
+        member.add_history(
+            action="add",
+            months=months if mode == "months" else None,
+            expires_at=new_expiry,
+            actor="service.bulk_add",
+            at=now,
+            extra=_history_extra(mode, normalized_payment),
+        )
+        store.upsert(member)
+        added.append(email)
+        results.append(_bulk_result(email, "ok", action="added", expires_at=new_expiry.isoformat(), months=months if mode == "months" else None))
+
+    store_backup: str | None = None
+    if added and not dry_run:
+        store_backup = _save_store(store)
+    recipients_result = _add_many_to_recipients_file(resolved_root, env, added, dry_run=dry_run) if added else None
+    return _bulk_summary(dry_run, len(tokens), duplicates, results, recipients_result, store_backup, mode=mode, payment=normalized_payment)
+
+
+def _select_bulk_targets(
+    store: MembershipStore, emails: str | Iterable[str] | None, all_active: bool, now: datetime
+) -> tuple[list[tuple[str, Member | None, dict[str, Any] | None]], int, int]:
+    """-> (plan in input order as (email, member, skip_result), requested, duplicates).
+    Exactly one of member / skip_result is set per entry.
+    """
+    tokens = _coerce_emails(emails)
+    if all_active:
+        if tokens:
+            raise ServiceError("invalid_arguments", "give either emails or all_active=True, not both")
+        plan = [(m.email, m, None) for m in sorted(store.members, key=lambda m: m.email) if m.effective_status(now) == "active"]
+        return plan, len(plan), 0
+    if not tokens:
+        raise ServiceError("invalid_arguments", "give emails or all_active=True")
+    deduped, duplicates = _dedupe_tokens(tokens)
+    plan = []
+    for token, email in deduped:
+        if email is None:
+            plan.append((token, None, _bulk_result(token, "skipped", "invalid_email", f"invalid email address: {token!r}")))
+            continue
+        member = store.find(email)
+        if member is None:
+            plan.append((email, None, _bulk_result(email, "skipped", "member_not_found", f"no member found for {email}")))
+        else:
+            plan.append((email, member, None))
+    return plan, len(tokens), duplicates
+
+
+def bulk_extend(
+    emails: str | Iterable[str] | None = None,
+    months: int | None = None,
+    all_active: bool = False,
+    note: str | None = None,
+    dry_run: bool = True,
+    *,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """`extend_member` for many members. Exactly one of `emails` /
+    `all_active=True` (currently-active members only; legacy and expired are
+    not touched). Cancelled members named explicitly are reinstated, same as
+    extend_member.
+    """
+    resolved_root, env = _context(root)
+    months = _check_months(months)
+    now = _now()
+    store = _load_store(resolved_root, env)
+    plan, requested, duplicates = _select_bulk_targets(store, emails, all_active, now)
+
+    results: list[dict[str, Any]] = []
+    touched: list[str] = []
+    for email, member, skipped in plan:
+        if member is None:
+            results.append(skipped)  # type: ignore[arg-type]
+            continue
+        previous = member.expires_at.isoformat() if member.expires_at else None
+        was_status = member.effective_status(now)
+        new_expiry = _apply_extend(member, months, note, now, None, "service.bulk_extend")
+        store.upsert(member)
+        touched.append(email)
+        results.append(
+            _bulk_result(email, "ok", action="extended", previous_expires_at=previous, expires_at=new_expiry.isoformat(), months=months, previous_status=was_status)
+        )
+
+    store_backup: str | None = None
+    if touched and not dry_run:
+        store_backup = _save_store(store)
+    recipients_result = _add_many_to_recipients_file(resolved_root, env, touched, dry_run=dry_run) if touched else None
+    return _bulk_summary(dry_run, requested, duplicates, results, recipients_result, store_backup, months=months)
+
+
+def bulk_set_expiry(
+    emails: str | Iterable[str] | None = None,
+    expires_at: str | None = None,
+    all_active: bool = False,
+    note: str | None = None,
+    dry_run: bool = True,
+    *,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """`set_expiry` for many members (pure date correction; never touches
+    status or notify_recipients.txt). `expires_at` must be concrete.
+    """
+    resolved_root, env = _context(root)
+    new_expiry = _parse_concrete_expiry(expires_at)
+    reason = note if note is not None else "bulk set_expiry via service"
+    now = _now()
+    store = _load_store(resolved_root, env)
+    plan, requested, duplicates = _select_bulk_targets(store, emails, all_active, now)
+
+    results: list[dict[str, Any]] = []
+    changed = 0
+    for email, member, skipped in plan:
+        if member is None:
+            results.append(skipped)  # type: ignore[arg-type]
+            continue
+        previous = member.expires_at.isoformat() if member.expires_at else None
+        _apply_set_expiry(member, new_expiry, reason, now, "service.bulk_set_expiry")
+        store.upsert(member)
+        changed += 1
+        results.append(_bulk_result(email, "ok", action="expiry_set", previous_expires_at=previous, expires_at=new_expiry.isoformat()))
+
+    store_backup: str | None = None
+    if changed and not dry_run:
+        store_backup = _save_store(store)
+    return _bulk_summary(dry_run, requested, duplicates, results, None, store_backup, expires_at=new_expiry.isoformat())
