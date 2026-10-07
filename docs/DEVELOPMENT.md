@@ -16,6 +16,7 @@ quantcheck/
   picks_email.py         subscriber alert subject, HTML and plain-text body
   picks_excel.py         subscriber Excel report (typed cells, Changes sheet)
   picks_format.py        shared value parsing/labels for email and Excel
+  weekly_digest.py       forwards the member-only Weekly Digest, once per week
   site_snapshot.py       authenticated site snapshot capture
   site_diff_notify.py    site-change diff and alerting
   official_mail_forwarder.py

@@ -33,6 +33,7 @@ class ScheduleTests(unittest.TestCase):
                 (9, 0, "picks"),
                 (9, 20, "official_mail"),
                 (9, 40, "picks"),
+                (9, 50, "weekly_digest"),
                 (12, 0, "official_mail"),
                 (12, 40, "daily_admin_status"),
                 (17, 0, "picks"),
@@ -44,7 +45,7 @@ class ScheduleTests(unittest.TestCase):
     def test_non_trading_day_schedule_runs_daily_picks_mail_and_admin_status(self):
         self.assertEqual(
             NON_TRADING_DAY_SCHEDULE,
-            [(12, 0, "picks"), (12, 20, "official_mail"), (12, 40, "daily_admin_status")],
+            [(12, 0, "picks"), (12, 20, "official_mail"), (12, 30, "weekly_digest"), (12, 40, "daily_admin_status"), (18, 0, "weekly_digest")],
         )
 
     def test_custom_schedule_parses_kinds(self):

@@ -31,7 +31,7 @@ from quantcheck.historical_resend import ResendValidationError, prepare_resend
 from quantcheck.service.errors import ServiceError
 from quantcheck.service.members import _load_store  # reuse: same fail-loud-to-admin semantics as members.py reads
 
-JOB_KINDS = ("picks", "health", "health_site", "official_mail", "daily_admin_status", "baseline", "screenshot", "test_email")
+JOB_KINDS = ("picks", "health", "health_site", "official_mail", "daily_admin_status", "weekly_digest", "baseline", "screenshot", "test_email")
 _ALWAYS_REQUIRES_CONFIRM = {"test_email"}
 
 REPAIR_DOC_RELATIVE_PATH = "docs/SITE_CHANGE_REPAIR.md"
@@ -128,6 +128,9 @@ def _dispatch(kind: str, *, force: bool, timeout: int | None) -> tuple[int, str]
         return rc, output
     if kind == "daily_admin_status":
         return scheduler_mod.run_cmd([python, "-m", "quantcheck.daily_admin_status"], timeout, capture_output=True)
+    if kind == "weekly_digest":
+        # Same fail-closed run the scheduler does: sends at most once per week_start.
+        return scheduler_mod.run_cmd([python, "-m", "quantcheck.weekly_digest"], timeout, capture_output=True)
     if kind == "test_email":
         return scheduler_mod.run_cmd([python, "-m", "quantcheck.picks_check", "--test-email"], timeout, capture_output=True)
     raise ServiceError("invalid_job_kind", f"unknown job kind: {kind}", {"kind": kind, "valid_kinds": list(JOB_KINDS)})

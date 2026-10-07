@@ -137,8 +137,10 @@ first). `next_job` is kept for backward compatibility and equals
 `next_jobs[0]`.
 
 `KIND` for `ops run` is one of `picks`, `health`, `health_site`,
-`official_mail`, `daily_admin_status`, `baseline`, `screenshot`,
-`test_email`. `ops run` reuses `state/quantcheck.lock` -- the exact lock
+`official_mail`, `daily_admin_status`, `weekly_digest`, `baseline`,
+`screenshot`, `test_email`. (`weekly_digest` is the same fail-closed run the
+scheduler does: it sends a new digest at most once per week and never
+re-sends a week already marked sent/sending/failed.) `ops run` reuses `state/quantcheck.lock` -- the exact lock
 file the scheduler daemon holds for a scheduled run -- so it can never race
 the daemon; if the lock is held, it returns `{"skipped": "locked"}`
 immediately instead of blocking.

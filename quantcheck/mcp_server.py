@@ -362,8 +362,8 @@ def ops_status() -> CallToolResult:
 def ops_run_job(kind: str, force: bool = False, timeout: int | None = None, confirm: bool = False) -> CallToolResult:
     """Run one job out of band from the scheduler, right now.
 
-    kind: one of "picks", "health", "health_site", "official_mail", "daily_admin_status", "baseline",
-    "screenshot", "test_email".
+    kind: one of "picks", "health", "health_site", "official_mail", "daily_admin_status", "weekly_digest",
+    "baseline", "screenshot", "test_email".
 
     Reuses state/quantcheck.lock (the same lock the daemon holds) so this can never race a scheduled
     run; if the lock is held, returns {"skipped": "locked"} immediately instead of blocking.

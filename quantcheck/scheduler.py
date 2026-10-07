@@ -35,7 +35,7 @@ def load_env():
 
 # When several jobs share a slot (e.g. month-end official_mail every 15 min
 # lands on 08:30/09:00/17:00 picks), all of them run, in this order.
-JOB_PRIORITY = ("picks", "health_site", "health", "daily_admin_status", "official_mail")
+JOB_PRIORITY = ("picks", "health_site", "health", "daily_admin_status", "weekly_digest", "official_mail")
 
 
 def next_due_jobs(raw_schedule: str | None = None, now: datetime | None = None):
@@ -161,6 +161,11 @@ def run_daily_admin_status():
     return run_cmd([sys.executable, "-m", "quantcheck.daily_admin_status"], timeout)
 
 
+def run_weekly_digest():
+    timeout = int(os.environ.get("QUANTCHECK_SCAN_TIMEOUT_SECONDS", "300"))
+    return run_cmd([sys.executable, "-m", "quantcheck.weekly_digest"], timeout)
+
+
 def run_once(kind: str):
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w") as lock:
@@ -182,6 +187,8 @@ def run_once(kind: str):
             return run_official_mail()
         if kind == "daily_admin_status":
             return run_daily_admin_status()
+        if kind == "weekly_digest":
+            return run_weekly_digest()
         raise SystemExit(f"unknown job kind: {kind}")
 
 
@@ -213,7 +220,7 @@ def daemon():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--once", choices=["picks", "health_site", "health", "official_mail"], help="run one job then exit")
+    ap.add_argument("--once", choices=["picks", "health_site", "health", "official_mail", "daily_admin_status", "weekly_digest"], help="run one job then exit")
     ap.add_argument("--daemon", action="store_true", help="run built-in scheduler loop")
     args = ap.parse_args()
     load_env()

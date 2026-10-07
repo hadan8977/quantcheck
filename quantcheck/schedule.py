@@ -14,6 +14,7 @@ TRADING_DAY_SCHEDULE = [
     (9, 0, "picks"),
     (9, 20, "official_mail"),
     (9, 40, "picks"),
+    (9, 50, "weekly_digest"),
     (12, 0, "official_mail"),
     (12, 40, "daily_admin_status"),
     (17, 0, "picks"),
@@ -25,10 +26,12 @@ NON_TRADING_DAY_SCHEDULE = [
     # Weekends and market holidays: one midday sweep is enough.
     (12, 0, "picks"),
     (12, 20, "official_mail"),
+    (12, 30, "weekly_digest"),
     (12, 40, "daily_admin_status"),
+    (18, 0, "weekly_digest"),
 ]
 
-VALID_KINDS = {"picks", "health_site", "health", "official_mail", "daily_admin_status"}
+VALID_KINDS = {"picks", "health_site", "health", "official_mail", "daily_admin_status", "weekly_digest"}
 MONTH_END_OFFICIAL_MAIL_INTERVAL_MINUTES = 15
 MONTH_END_OFFICIAL_MAIL_START = (8, 0)
 MONTH_END_OFFICIAL_MAIL_END = (20, 0)
