@@ -62,7 +62,11 @@ def next_due_jobs(raw_schedule: str | None = None, now: datetime | None = None):
         candidates.append((target, kind))
     target = min(t for t, _ in candidates)
     kinds = sorted({k for t, k in candidates if t == target}, key=lambda k: (JOB_PRIORITY.index(k) if k in JOB_PRIORITY else len(JOB_PRIORITY), k))
-    return max(1, int((target - now).total_seconds())), target, kinds
+    # Subtract in UTC: two datetimes sharing the same ZoneInfo subtract by wall
+    # clock and ignore the DST offset change, which made the first job after a
+    # DST switch fire an hour early (Nov) or an hour late (Mar).
+    seconds = (target.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds()
+    return max(1, int(seconds)), target, kinds
 
 
 def seconds_until_next(raw_schedule: str | None = None):

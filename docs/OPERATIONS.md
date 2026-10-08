@@ -167,13 +167,14 @@ Default schedule, all in `America/New_York`:
 - `08:45` health + site scan
 - `09:00` picks scan
 - `09:20` official mail scan
-- `09:40` picks scan
 - `09:50` weekly digest check
 - `12:00` official mail scan
 - `12:40` daily admin status
 - `17:00` picks scan
 - `17:15` health + site scan
 - `17:30` official mail scan
+
+Times are New York time, so they move with the market across daylight-saving changes (in Beijing time the scans shift one hour later in November and back in March). NYSE holidays use the weekend schedule (via `pandas_market_calendars`); on early-close days (13:00 ET) the 17:00 scan still runs after the close.
 
 Weekends and market holidays: `12:00` picks, `12:20` official mail, `12:30` weekly digest, `12:40` daily admin status, `18:00` weekly digest.
 
@@ -184,7 +185,7 @@ When `QUANTCHECK_SCHEDULE` is empty, the daemon automatically expands official-m
 Override only for emergencies with:
 
 ```env
-QUANTCHECK_SCHEDULE=08:20:official_mail,08:30:picks,08:45:health_site,09:00:picks,09:20:official_mail,09:40:picks,09:50:weekly_digest,12:00:official_mail,12:40:daily_admin_status,17:00:picks,17:15:health_site,17:30:official_mail
+QUANTCHECK_SCHEDULE=08:20:official_mail,08:30:picks,08:45:health_site,09:00:picks,09:20:official_mail,09:50:weekly_digest,12:00:official_mail,12:40:daily_admin_status,17:00:picks,17:15:health_site,17:30:official_mail
 ```
 
 Allowed job kinds are `picks`, `health_site`, `health`, `official_mail`, `daily_admin_status`, and `weekly_digest`.

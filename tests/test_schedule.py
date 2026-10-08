@@ -32,7 +32,6 @@ class ScheduleTests(unittest.TestCase):
                 (8, 45, "health_site"),
                 (9, 0, "picks"),
                 (9, 20, "official_mail"),
-                (9, 40, "picks"),
                 (9, 50, "weekly_digest"),
                 (12, 0, "official_mail"),
                 (12, 40, "daily_admin_status"),
@@ -170,3 +169,37 @@ class ScheduleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DstSchedulerTests(unittest.TestCase):
+    def test_fall_back_sleep_is_real_elapsed_time(self):
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        from quantcheck.scheduler import next_due_jobs
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 10, 31, 20, 0, tzinfo=ny)  # Sat, EDT
+        seconds, target, kinds = next_due_jobs(None, now)
+        self.assertEqual((target.hour, target.minute, kinds[0]), (12, 0, "picks"))  # Sun 11/01, EST
+        self.assertEqual(seconds, 17 * 3600)  # 00:00Z -> 17:00Z, not 16h of wall clock
+
+    def test_spring_forward_sleep_is_real_elapsed_time(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from quantcheck.scheduler import next_due_jobs
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2027, 3, 13, 20, 0, tzinfo=ny)  # Sat, EST
+        seconds, target, kinds = next_due_jobs(None, now)
+        self.assertEqual((target.hour, target.minute, kinds[0]), (12, 0, "picks"))  # Sun 3/14, EDT
+        self.assertEqual(seconds, 15 * 3600)  # 01:00Z -> 16:00Z, not 16h of wall clock
+
+    def test_every_scheduled_picks_time_is_an_accepted_scan_window(self):
+        import sys
+        import types
+        sys.modules.setdefault("playwright", types.ModuleType("playwright"))
+        sys.modules.setdefault("playwright.sync_api", types.SimpleNamespace(sync_playwright=lambda: None, TimeoutError=TimeoutError))
+        from quantcheck.picks_check import WINDOWS
+        windows = set(WINDOWS.values())
+        for schedule in (TRADING_DAY_SCHEDULE, NON_TRADING_DAY_SCHEDULE):
+            for hour, minute, kind in schedule:
+                if kind == "picks":
+                    self.assertIn((hour, minute), windows, f"picks at {hour:02d}:{minute:02d} would always skip itself")

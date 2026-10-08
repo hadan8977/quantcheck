@@ -7,13 +7,15 @@ from functools import lru_cache
 import pandas_market_calendars as mcal
 
 TRADING_DAY_SCHEDULE = [
-    # US regular open is 09:30 America/New_York.
+    # US regular open is 09:30 America/New_York. Picks: two premarket scans
+    # (1h and 30min before the open) and one after the close -- exactly the
+    # windows picks_check.WINDOWS accepts. All times are New York time, so
+    # they follow the market through DST changes automatically.
     (8, 20, "official_mail"),
     (8, 30, "picks"),
     (8, 45, "health_site"),
     (9, 0, "picks"),
     (9, 20, "official_mail"),
-    (9, 40, "picks"),
     (9, 50, "weekly_digest"),
     (12, 0, "official_mail"),
     (12, 40, "daily_admin_status"),
