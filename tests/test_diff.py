@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from quantcheck.diff import compare, diff_rows, parse_analyst_signal
+from quantcheck.diff import DYNAMIC_NOISE_FIELDS, compare, diff_rows, parse_analyst_signal
 from quantcheck.notify_dedupe import should_send_notification
 
 
@@ -42,90 +42,72 @@ def sample_picks():
     }
 
 
+def weekly_change(old, new, field="analyst_signal"):
+    """compare() result for one weekly row whose `field` goes from old to new."""
+    before = sample_picks()
+    after = copy.deepcopy(before)
+    before["weekly"]["rows"][0][field] = old
+    after["weekly"]["rows"][0][field] = new
+    return compare(before, after)
+
+
 class DiffTests(unittest.TestCase):
-    def test_dynamic_price_fields_do_not_trigger_pick_change(self):
-        old = [{"symbol": "ABC", "company": "Alpha", "current_price": "$10.00", "rating": "Buy"}]
-        new = [{"symbol": "ABC", "company": "Alpha", "current_price": "$11.00", "rating": "Buy"}]
-
-        self.assertEqual(diff_rows(old, new), {"added": [], "removed": [], "changed": []})
-
-    def test_static_field_change_is_reported(self):
-        old = [{"symbol": "ABC", "company": "Alpha", "rating": "Buy"}]
-        new = [{"symbol": "ABC", "company": "Alpha", "rating": "Hold"}]
-
+    def test_diff_rows_reports_static_changes_and_ignores_noise_and_scraper_gaps(self):
+        base = {"symbol": "ABC", "company": "Alpha", "rating": "Buy"}
         self.assertEqual(
-            diff_rows(old, new)["changed"],
+            diff_rows([base], [{**base, "rating": "Hold"}])["changed"],
             [{"symbol": "ABC", "fields": {"rating": {"old": "Buy", "new": "Hold"}}}],
         )
+        self.assertEqual(diff_rows([{**base, "current_price": "$10.00"}], [{**base, "current_price": "$11.00"}]), {"added": [], "removed": [], "changed": []})
+        # A newly-missing rating is a scraper gap, not a pick change.
+        self.assertEqual(diff_rows([{**base, "rating": "Strong Buy"}], [{**base, "rating": None}])["changed"], [])
+        self.assertEqual(diff_rows([base], [base, {"symbol": "NEW", "company": "New Co"}])["added"], ["NEW"])
+        self.assertEqual(diff_rows([base], [])["removed"], ["ABC"])
 
-    def test_missing_new_rating_is_treated_as_scraper_gap_not_pick_change(self):
-        old = [{"symbol": "ABC", "company": "Alpha", "rating": "Strong Buy", "gt_score": "4.9/5"}]
-        new = [{"symbol": "ABC", "company": "Alpha", "rating": None, "gt_score": "4.9/5"}]
+    def test_every_dynamic_noise_field_is_ignored(self):
+        for field in ("source_kind", "signal_price", "signal_date", "signal_at", "watch_reason", "analyst_signal_unavailable",
+                      "next_earnings_unavailable", "gt_score_source", "current_price", "return"):
+            self.assertIn(field, DYNAMIC_NOISE_FIELDS)
+        for field in sorted(DYNAMIC_NOISE_FIELDS):
+            with self.subTest(field):
+                self.assertFalse(weekly_change("", "now watchlist", field)["changed"])
+                self.assertFalse(weekly_change(True, False, field)["changed"])
 
-        self.assertEqual(diff_rows(old, new)["changed"], [])
-
-    def test_unknown_dates_are_not_reported_as_source_changes(self):
-        old = {"monthly": {"pick_date": "May 2026", "rows": []}, "weekly": {"pick_date": "Unknown", "rows": []}}
-        new = {"monthly": {"pick_date": "Unknown", "rows": []}, "weekly": {"pick_date": "05/22/26", "rows": []}}
-
-        self.assertFalse(compare(old, new)["changed"])
-
-    def test_source_kind_layout_metadata_does_not_trigger_notification(self):
-        old = sample_picks()
-        new = copy.deepcopy(old)
-        old["weekly"]["rows"][0]["source_kind"] = ""
-        new["weekly"]["rows"][0]["source_kind"] = "watchlist"
-
-        self.assertFalse(compare(old, new)["changed"])
-
-    def test_analyst_signal_score_is_parsed_from_suffix(self):
-        self.assertEqual(parse_analyst_signal("Strong Buy +0.27"), ("Strong Buy", 0.27))
-
-    def test_identical_picks_with_dynamic_fetch_metadata_do_not_trigger_duplicate_notification(self):
+    def test_noise_does_not_trigger_notification(self):
         old = sample_picks()
         new = copy.deepcopy(old)
         old["fetched_at"] = "2026-05-21T08:30:00-04:00"
         new["fetched_at"] = "2026-05-21T17:00:00-04:00"
-        old["monthly"]["rows"][0]["current_price"] = "$10.00"
         new["monthly"]["rows"][0]["current_price"] = "$10.42"
-        old["weekly"]["rows"][0]["current_price"] = "$20.00"
         new["weekly"]["rows"][0]["current_price"] = "$20.55"
-
         self.assertFalse(compare(old, new)["changed"])
 
-    def test_small_analyst_signal_score_noise_does_not_trigger_duplicate_notification(self):
-        old = sample_picks()
-        new = copy.deepcopy(old)
-        old["weekly"]["rows"][0]["analyst_signal"] = "Buy +0.26"
-        new["weekly"]["rows"][0]["analyst_signal"] = "Buy +0.29"
-
+        # Unknown dates are not source changes.
+        old = {"monthly": {"pick_date": "May 2026", "rows": []}, "weekly": {"pick_date": "Unknown", "rows": []}}
+        new = {"monthly": {"pick_date": "Unknown", "rows": []}, "weekly": {"pick_date": "05/22/26", "rows": []}}
         self.assertFalse(compare(old, new)["changed"])
 
-    def test_analyst_signal_threshold(self):
-        def changed(a, b):
-            old = sample_picks()
-            new = copy.deepcopy(old)
-            old["weekly"]["rows"][0]["analyst_signal"] = a
-            new["weekly"]["rows"][0]["analyst_signal"] = b
-            return compare(old, new)["changed"]
+    def test_real_date_change_is_reported(self):
+        old, new = sample_picks(), sample_picks()
+        new["weekly"]["pick_date"] = "05/18/26"
+        result = compare(old, new)
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["weekly"]["date"], {"old": "05/11/26", "new": "05/18/26"})
+        self.assertFalse(result["monthly"]["changed_flag"])
 
-        # Daily oscillation seen in production (2026-09-22/23): no email.
-        self.assertFalse(changed("Buy +0.38", "Strong Buy +0.56"))
-        self.assertFalse(changed("Strong Buy +0.56", "Buy +0.31"))
-        self.assertFalse(changed("Sell -0.16", "Buy +0.38"))
+    def test_analyst_signal_parsing_and_threshold(self):
+        self.assertEqual(parse_analyst_signal("Strong Buy +0.27"), ("Strong Buy", 0.27))
+        self.assertEqual(parse_analyst_signal(""), ("", None))
+        self.assertEqual(parse_analyst_signal("Neutral"), ("Neutral", None))
+
+        # Daily oscillation seen in production (2026-09-22/23) and small score noise: no email.
+        for old, new in [("Buy +0.38", "Strong Buy +0.56"), ("Strong Buy +0.56", "Buy +0.31"), ("Sell -0.16", "Buy +0.38"), ("Buy +0.26", "Buy +0.29")]:
+            with self.subTest(old=old, new=new):
+                self.assertFalse(weekly_change(old, new)["changed"])
         # Large swings and Strong Sell entry/exit still notify.
-        self.assertTrue(changed("Sell -0.22", "Strong Buy +0.51"))
-        self.assertTrue(changed("Sell -0.29", "Strong Sell -0.52"))
-        self.assertTrue(changed("Strong Sell -0.52", "Sell -0.40"))
-
-    def test_availability_flags_alone_do_not_trigger(self):
-        old = sample_picks()
-        new = copy.deepcopy(old)
-        old["weekly"]["rows"][0]["analyst_signal_unavailable"] = True
-        new["weekly"]["rows"][0]["analyst_signal_unavailable"] = False
-        old["weekly"]["rows"][0]["next_earnings_unavailable"] = True
-        new["weekly"]["rows"][0]["next_earnings_unavailable"] = False
-        self.assertFalse(compare(old, new)["changed"])
+        for old, new in [("Sell -0.22", "Strong Buy +0.51"), ("Sell -0.29", "Strong Sell -0.52"), ("Strong Sell -0.52", "Sell -0.40")]:
+            with self.subTest(old=old, new=new):
+                self.assertTrue(weekly_change(old, new)["changed"])
 
     def test_same_changed_payload_is_not_notified_twice(self):
         old = sample_picks()
@@ -138,6 +120,10 @@ class DiffTests(unittest.TestCase):
             dedupe_path = Path(tmp) / "last_picks_change_notification.json"
             self.assertTrue(should_send_notification(diff, new, dedupe_path=dedupe_path))
             self.assertFalse(should_send_notification(diff, new, dedupe_path=dedupe_path))
+            # A different payload is a new notification.
+            newer = copy.deepcopy(new)
+            newer["weekly"]["rows"].append({"symbol": "NEWER", "company": "Newer Co", "rating": "Buy"})
+            self.assertTrue(should_send_notification(compare(old, newer), newer, dedupe_path=dedupe_path))
 
 
 if __name__ == "__main__":

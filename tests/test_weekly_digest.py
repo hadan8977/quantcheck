@@ -14,8 +14,8 @@ sys.modules.setdefault(
     types.SimpleNamespace(sync_playwright=lambda: None, TimeoutError=TimeoutError),
 )
 
-from quantcheck import picks_check, picks_report, weekly_digest
-from quantcheck.notify_routes import EmailRoute
+from quantcheck import picks_check, picks_report, weekly_digest  # noqa: E402
+from quantcheck.notify_routes import EmailRoute  # noqa: E402
 
 
 def digest(week="2026-10-02", **extra):
@@ -163,7 +163,7 @@ class ScraperContextTests(unittest.TestCase):
         page.evaluate = evaluate
         return page
 
-    def test_digest_reasons_attach_only_for_the_same_week(self):
+    def test_digest_reasons_attach_only_for_the_same_week_and_failures_never_break_the_scrape(self):
         api = [{"ticker": "TXG", "week_start": "2026-10-02"}]
         body = {"week_start": "2026-10-02", "sections": {"watchlist": [{"ticker": "TXG", "reason": "At a 52-week high"}]}}
         rows = picks_report.attach_digest_reasons(self._page({"status": 200, "body": body}), [{"symbol": "TXG"}], api)
@@ -172,7 +172,6 @@ class ScraperContextTests(unittest.TestCase):
         rows = picks_report.attach_digest_reasons(self._page({"status": 200, "body": stale}), [{"symbol": "TXG"}], api)
         self.assertNotIn("watch_reason", rows[0])
 
-    def test_digest_reason_failures_never_break_the_scrape(self):
         rows = [{"symbol": "TXG"}]
         self.assertEqual(picks_report.attach_digest_reasons(self._page(exc=RuntimeError("boom")), rows, []), rows)
         self.assertEqual(picks_report.attach_digest_reasons(self._page({"status": 403, "body": None}), rows, []), rows)

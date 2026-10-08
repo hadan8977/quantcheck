@@ -42,118 +42,132 @@ def valid_capture():
     }
 
 
+def watchlist_weekly(rows, **extra):
+    return {"kind": "watchlist", "pick_date": "Updated on Jun 26, 2026", "rows": rows, **extra}
+
+
+def watchlist_card_rows(**extra):
+    return [
+        {"symbol": f"W{i}", "company": "Watchlist One Inc.", "current_price": "$10.00", "sector": "Technology", **extra}
+        for i in range(1, 11)
+    ]
+
+
 class ValidationTests(unittest.TestCase):
-    def test_valid_member_capture_passes(self):
-        validate_member_picks_data(valid_capture())
+    def test_accepted_captures(self):
+        def monthly_without_buy_price(data):
+            data["monthly"]["rows"][0]["buy_or_entry_price"] = ""
 
-    def test_demo_weekly_signature_is_rejected(self):
-        data = valid_capture()
-        data["weekly"]["pick_date"] = "05/15/26"
-        data["weekly"]["rows"] = [valid_weekly_row(symbol) for symbol in ["SNDK", "LITE", "AAOI", "FORM", "VIAV", "ENPH"]]
+        def weekly_without_buy_price(data):
+            data["weekly"]["rows"][0]["buy_or_entry_price"] = ""
 
-        with self.assertRaisesRegex(RuntimeError, "demo Weekly Picks"):
-            validate_member_picks_data(data)
+        def new_layout_holdings_date(data):
+            data["monthly"]["pick_date"] = "May Holdings 05/01/26 - now"
 
-    def test_partial_weekly_details_are_rejected(self):
-        data = valid_capture()
-        data["weekly"]["rows"][0]["analyst_signal"] = ""
+        def watchlist_dialog_details(data):
+            data["weekly"]["kind"] = "watchlist"
+            for row in data["weekly"]["rows"]:
+                row.update({"momentum": "1.20/2", "relative_strength": "3.00/3", "gt_score_source": "dialog_components"})
 
-        with self.assertRaisesRegex(RuntimeError, "incomplete detail rows"):
-            validate_member_picks_data(data)
+        def watchlist_api_score(data):
+            data["weekly"]["kind"] = "watchlist"
+            for row in data["weekly"]["rows"]:
+                row["gt_score_source"] = "weekly_api_score"
 
-    def test_monthly_detail_without_buy_price_passes_when_other_details_loaded(self):
-        data = valid_capture()
-        data["monthly"]["rows"][0]["buy_or_entry_price"] = ""
+        def watchlist_explicitly_unavailable_details(data):
+            watchlist_api_score(data)
+            row = data["weekly"]["rows"][0]
+            row.update({"next_earnings": "", "next_earnings_unavailable": True, "analyst_signal": "", "analyst_signal_unavailable": True})
 
-        validate_member_picks_data(data)
-
-    def test_monthly_missing_loaded_detail_field_is_rejected(self):
-        data = valid_capture()
-        data["monthly"]["rows"][0]["analyst_signal"] = ""
-
-        with self.assertRaisesRegex(RuntimeError, "incomplete loaded rows"):
-            validate_member_picks_data(data)
-
-    def test_monthly_analyst_signal_with_description_is_rejected(self):
-        data = valid_capture()
-        data["monthly"]["rows"][0]["analyst_signal"] = (
-            "Sell -0.29 Sandisk Corporation develops data storage devices. More Headlines"
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "malformed analyst signal"):
-            validate_member_picks_data(data)
-
-    def test_weekly_detail_without_buy_price_passes_when_other_details_loaded(self):
-        data = valid_capture()
-        data["weekly"]["rows"][0]["buy_or_entry_price"] = ""
-
-        validate_member_picks_data(data)
-
-    def test_new_layout_without_detail_rows_passes(self):
-        data = {
-            "monthly": {"pick_date": "May Holdings 05/01/26 - now", "rows": [valid_monthly_row()]},
-            "weekly": {
-                "pick_date": "05/22/26",
-                "rows": [valid_weekly_row(f"W{i}") for i in range(1, 11)],
-            },
+        cases = {
+            "valid member capture": lambda data: None,
+            "monthly detail without buy price when other details loaded": monthly_without_buy_price,
+            "weekly detail without buy price when other details loaded": weekly_without_buy_price,
+            "new layout without detail rows": new_layout_holdings_date,
+            "watchlist with dialog details": watchlist_dialog_details,
+            "watchlist api score without retired component fields": watchlist_api_score,
+            "watchlist accepts explicitly unavailable source details": watchlist_explicitly_unavailable_details,
         }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                data = valid_capture()
+                mutate(data)
+                validate_member_picks_data(data)
 
-        validate_member_picks_data(data)
+    def test_rejected_captures(self):
+        def demo_weekly(data):
+            data["weekly"]["pick_date"] = "05/15/26"
+            data["weekly"]["rows"] = [valid_weekly_row(symbol) for symbol in ["SNDK", "LITE", "AAOI", "FORM", "VIAV", "ENPH"]]
 
-    def test_watchlist_layout_rejects_card_fields_without_dialog_details(self):
-        data = {
-            "monthly": {"pick_date": "Updated July 1, 2026", "rows": [valid_monthly_row()]},
-            "weekly": {
-                "kind": "watchlist",
-                "pick_date": "Updated on Jun 26, 2026",
+        def partial_weekly_details(data):
+            data["weekly"]["rows"][0]["analyst_signal"] = ""
+
+        def monthly_missing_analyst_signal(data):
+            data["monthly"]["rows"][0]["analyst_signal"] = ""
+
+        def monthly_missing_both_fields_entirely(data):
+            # Regression (real capture): next_earnings and analyst_signal missing entirely, not just
+            # empty, indicates a partial/detail-load failure.
+            data["monthly"] = {
+                "pick_date": "Updated May 1, 2026",
+                "rows": [{
+                    "symbol": "AAOI",
+                    "company": "Applied Optoelectronics, Inc.",
+                    "current_price": "$177.62",
+                    "return": "+97.02%",
+                    "sector": "Electronic Technology",
+                    "gt_score": "4.98/5",
+                    "buy_or_entry_price": "$90.15",
+                }],
+            }
+            data["weekly"] = {
+                "pick_date": "Week of May 25, 2026",
                 "rows": [
                     {
                         "symbol": f"W{i}",
-                        "company": "Watchlist One Inc.",
-                        "current_price": "$10.00",
-                        "sector": "Technology",
-                        "source_kind": "watchlist",
+                        "company": "Weekly One Inc.",
+                        "current_price": "$1,589.55",
+                        "buy_or_entry_price": "$1,431.67",
+                        "sector": "Electronic Technology",
+                        "gt_score": "5.01/5",
+                        "next_earnings": "Aug 13, 2026",
+                        "analyst_signal": "Strong Buy +0.51",
                     }
                     for i in range(1, 11)
                 ],
-            },
+            }
+
+        def monthly_signal_with_description(data):
+            data["monthly"]["rows"][0]["analyst_signal"] = "Sell -0.29 Sandisk Corporation develops data storage devices. More Headlines"
+
+        def watchlist_cards_without_dialog_details(data):
+            data["monthly"]["pick_date"] = "Updated July 1, 2026"
+            data["weekly"] = watchlist_weekly(watchlist_card_rows(source_kind="watchlist"))
+
+        def watchlist_still_requires_monthly_quality(data):
+            data["monthly"]["pick_date"] = "Updated July 1, 2026"
+            data["monthly"]["rows"][0]["analyst_signal"] = ""
+            data["weekly"] = watchlist_weekly(watchlist_card_rows())
+
+        def partial_top10(data):
+            data["weekly"]["rows"] = [valid_weekly_row("BKR")]
+
+        cases = {
+            "demo weekly signature": (demo_weekly, "demo Weekly Picks"),
+            "partial weekly details": (partial_weekly_details, "incomplete detail rows"),
+            "monthly missing a loaded detail field": (monthly_missing_analyst_signal, "incomplete loaded rows"),
+            "monthly missing detail fields entirely (partial detail load)": (monthly_missing_both_fields_entirely, "incomplete loaded rows"),
+            "monthly analyst signal with company description": (monthly_signal_with_description, "malformed analyst signal"),
+            "watchlist card fields without dialog details": (watchlist_cards_without_dialog_details, "incomplete detail rows"),
+            "watchlist layout still requires monthly detail quality": (watchlist_still_requires_monthly_quality, "incomplete loaded rows"),
+            "partial weekly top 10": (partial_top10, "expected near-complete Weekly Top 10"),
         }
-
-        with self.assertRaisesRegex(RuntimeError, "incomplete detail rows"):
-            validate_member_picks_data(data)
-
-    def test_watchlist_layout_passes_with_dialog_details(self):
-        data = valid_capture()
-        data["weekly"]["kind"] = "watchlist"
-        for row in data["weekly"]["rows"]:
-            row.update({
-                "momentum": "1.20/2",
-                "relative_strength": "3.00/3",
-                "gt_score_source": "dialog_components",
-            })
-
-        validate_member_picks_data(data)
-
-    def test_watchlist_api_score_passes_without_retired_component_fields(self):
-        data = valid_capture()
-        data["weekly"]["kind"] = "watchlist"
-        for row in data["weekly"]["rows"]:
-            row["gt_score_source"] = "weekly_api_score"
-
-        validate_member_picks_data(data)
-
-    def test_watchlist_accepts_explicitly_unavailable_source_details(self):
-        data = valid_capture()
-        data["weekly"]["kind"] = "watchlist"
-        for row in data["weekly"]["rows"]:
-            row["gt_score_source"] = "weekly_api_score"
-        row = data["weekly"]["rows"][0]
-        row["next_earnings"] = ""
-        row["next_earnings_unavailable"] = True
-        row["analyst_signal"] = ""
-        row["analyst_signal_unavailable"] = True
-
-        validate_member_picks_data(data)
+        for name, (mutate, message) in cases.items():
+            with self.subTest(name):
+                data = valid_capture()
+                mutate(data)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    validate_member_picks_data(data)
 
     def test_watchlist_detail_cleaning_preserves_unavailable_marker_types(self):
         cleaned = clean_detail_values({
@@ -165,30 +179,6 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(cleaned["next_earnings"], "—")
         self.assertIs(cleaned["next_earnings_unavailable"], True)
         self.assertIs(cleaned["analyst_signal_unavailable"], False)
-
-    def test_watchlist_layout_still_requires_monthly_detail_quality(self):
-        data = {
-            "monthly": {"pick_date": "Updated July 1, 2026", "rows": [valid_monthly_row()]},
-            "weekly": {
-                "kind": "watchlist",
-                "pick_date": "Updated on Jun 26, 2026",
-                "rows": [
-                    {"symbol": f"W{i}", "company": "Watchlist One Inc.", "current_price": "$10.00", "sector": "Technology"}
-                    for i in range(1, 11)
-                ],
-            },
-        }
-        data["monthly"]["rows"][0]["analyst_signal"] = ""
-
-        with self.assertRaisesRegex(RuntimeError, "incomplete loaded rows"):
-            validate_member_picks_data(data)
-
-    def test_partial_weekly_top10_capture_is_rejected(self):
-        data = valid_capture()
-        data["weekly"]["rows"] = [valid_weekly_row("BKR")]
-
-        with self.assertRaisesRegex(RuntimeError, "expected near-complete Weekly Top 10"):
-            validate_member_picks_data(data)
 
 
 if __name__ == "__main__":

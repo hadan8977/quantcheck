@@ -2,6 +2,7 @@ import _test_env  # noqa: F401  -- must stay first: isolates QUANTCHECK_HOME fro
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 
 sys.modules.setdefault("playwright", types.ModuleType("playwright"))
 sys.modules.setdefault(
@@ -9,9 +10,19 @@ sys.modules.setdefault(
     types.SimpleNamespace(sync_playwright=lambda: None, TimeoutError=TimeoutError),
 )
 
-from quantcheck import picks_email
-from quantcheck.diff import compare
-from quantcheck.picks_format import display_date, format_fetched, parse_date, parse_gt_score, parse_money, parse_pct, short_date, stock_count
+from quantcheck import picks_email  # noqa: E402
+from quantcheck.diff import compare  # noqa: E402
+from quantcheck.picks_format import (  # noqa: E402
+    display_date,
+    format_fetched,
+    parse_date,
+    parse_gt_score,
+    parse_money,
+    parse_pct,
+    short_date,
+    since_signal,
+    stock_count,
+)
 
 
 def row(symbol, **extra):
@@ -29,22 +40,50 @@ def snapshot(monthly, weekly, monthly_date="Updated October 1", weekly_date="Upd
 
 
 class SubjectTests(unittest.TestCase):
-    def test_portfolio_rebalance_lists_added_and_removed_symbols(self):
-        old = snapshot([row("HPE"), row("PANW"), row("DELL")], [row("TXG")], monthly_date="Updated September 1")
-        new = snapshot([row("MRNA"), row("VEEV"), row("DELL")], [row("TXG")])
-        subject = picks_email.build_subject(compare(old, new), new)
-        self.assertEqual(subject, "Quant GT · Portfolio rebalance: +MRNA +VEEV -HPE -PANW")
+    def test_subject_classification(self):
+        sep1, sep25 = "Updated September 1", "Updated on Sep 25, 2026"
+        cases = {
+            "portfolio rebalance lists added and removed symbols": (
+                snapshot([row("HPE"), row("PANW"), row("DELL")], [row("TXG")], monthly_date=sep1),
+                snapshot([row("MRNA"), row("VEEV"), row("DELL")], [row("TXG")]),
+                "Quant GT · Portfolio rebalance: +MRNA +VEEV -HPE -PANW",
+            ),
+            "weekly rotation uses the watchlist name": (
+                snapshot([row("DELL")], [row("TXG"), row("HALO")], weekly_date=sep25),
+                snapshot([row("DELL")], [row("TXG"), row("U")]),
+                "Quant GT · Weekly Watchlist: +U -HALO",
+            ),
+            "both lists changing mentions both": (
+                snapshot([row("A")], [row("B")], monthly_date=sep1, weekly_date=sep25),
+                snapshot([row("C")], [row("D")]),
+                "Quant GT · Portfolio rebalance: +C -A | Weekly Watchlist: +D -B",
+            ),
+            "single signal change shows old and new values": (
+                snapshot([], [row("U", analyst_signal="Sell -0.20")]),
+                snapshot([], [row("U", analyst_signal="Strong Buy +0.60")]),
+                "Quant GT · Analyst consensus: U Sell -0.20 → Strong Buy +0.60",
+            ),
+            "same signal change in both lists counts once": (
+                snapshot([row("U", analyst_signal="Sell -0.20")], [row("U", analyst_signal="Sell -0.20"), row("V", analyst_signal="Buy +0.10")]),
+                snapshot([row("U", analyst_signal="Buy +0.60")], [row("U", analyst_signal="Buy +0.60"), row("V", analyst_signal="Buy +0.90")]),
+                "Quant GT · Analyst consensus changes: U, V",
+            ),
+            "date-only refresh": (
+                snapshot([row("A")], [row("B")], weekly_date=sep25),
+                snapshot([row("A")], [row("B")]),
+                "Quant GT · Weekly Watchlist refreshed for Oct 2, 2026, no stock changes",
+            ),
+            "gt score only change": (
+                snapshot([], [row("A", gt_score="4.10/5"), row("B", gt_score="4.20/5")]),
+                snapshot([], [row("A", gt_score="4.30/5"), row("B", gt_score="4.00/5")]),
+                "Quant GT · GT Score updated: A B",
+            ),
+        }
+        for name, (old, new, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(picks_email.build_subject(compare(old, new), new), expected)
 
-    def test_weekly_rotation_uses_watchlist_name(self):
-        old = snapshot([row("DELL")], [row("TXG"), row("HALO")], weekly_date="Updated on Sep 25, 2026")
-        new = snapshot([row("DELL")], [row("TXG"), row("U")])
-        self.assertEqual(picks_email.build_subject(compare(old, new), new), "Quant GT · Weekly Watchlist: +U -HALO")
-
-    def test_both_lists_changing_mentions_both(self):
-        old = snapshot([row("A")], [row("B")], monthly_date="Updated September 1", weekly_date="Updated on Sep 25, 2026")
-        new = snapshot([row("C")], [row("D")])
-        subject = picks_email.build_subject(compare(old, new), new)
-        self.assertEqual(subject, "Quant GT · Portfolio rebalance: +C -A | Weekly Watchlist: +D -B")
+        self.assertEqual(picks_email.build_subject(None, snapshot([], [])), "Quant GT · Current picks")
 
     def test_long_symbol_lists_are_truncated(self):
         old = snapshot([row(s) for s in "ABCDEF"], [], monthly_date="Updated September 1")
@@ -53,35 +92,6 @@ class SubjectTests(unittest.TestCase):
         self.assertIn("+G +H +I +J +2 more", subject)
         self.assertLess(len(subject), 120)
 
-    def test_single_signal_change_shows_old_and_new_values(self):
-        old = snapshot([], [row("U", analyst_signal="Sell -0.20")])
-        new = snapshot([], [row("U", analyst_signal="Strong Buy +0.60")])
-        self.assertEqual(
-            picks_email.build_subject(compare(old, new), new),
-            "Quant GT · Analyst consensus: U Sell -0.20 → Strong Buy +0.60",
-        )
-
-    def test_same_signal_change_in_both_lists_counts_once(self):
-        old = snapshot([row("U", analyst_signal="Sell -0.20")], [row("U", analyst_signal="Sell -0.20"), row("V", analyst_signal="Buy +0.10")])
-        new = snapshot([row("U", analyst_signal="Buy +0.60")], [row("U", analyst_signal="Buy +0.60"), row("V", analyst_signal="Buy +0.90")])
-        self.assertEqual(picks_email.build_subject(compare(old, new), new), "Quant GT · Analyst consensus changes: U, V")
-
-    def test_date_only_refresh(self):
-        old = snapshot([row("A")], [row("B")], weekly_date="Updated on Sep 25, 2026")
-        new = snapshot([row("A")], [row("B")])
-        self.assertEqual(
-            picks_email.build_subject(compare(old, new), new),
-            "Quant GT · Weekly Watchlist refreshed for Oct 2, 2026, no stock changes",
-        )
-
-    def test_gt_score_only_change(self):
-        old = snapshot([], [row("A", gt_score="4.10/5"), row("B", gt_score="4.20/5")])
-        new = snapshot([], [row("A", gt_score="4.30/5"), row("B", gt_score="4.00/5")])
-        self.assertEqual(picks_email.build_subject(compare(old, new), new), "Quant GT · GT Score updated: A B")
-
-    def test_no_diff_is_current_picks(self):
-        self.assertEqual(picks_email.build_subject(None, snapshot([], [])), "Quant GT · Current picks")
-
 
 class BodyTests(unittest.TestCase):
     def setUp(self):
@@ -89,22 +99,14 @@ class BodyTests(unittest.TestCase):
         self.new = snapshot([row("MRNA", sector="Health Technology"), row("DELL")], [row("TXG", gt_score="4.81/5")])
         self.diff = compare(self.old, self.new)
 
-    def test_html_uses_previous_snapshot_for_removed_stock_details(self):
+    def test_html_uses_previous_snapshot_carries_preheader_and_optional_banner(self):
         html = picks_email.build_html(self.new, self.diff, previous=self.old)
-        self.assertIn("HPE Inc.", html)
-        self.assertIn("Last return", html)
-        self.assertIn("+18.90%", html)
-        self.assertIn(">NEW<", html)  # added stock flagged in the holdings list
-        self.assertIn("TXG</b>", html)  # GT re-rating chip
-        self.assertIn("Portfolio rebalanced", html)
-
-    def test_html_preheader_carries_the_summary(self):
-        html = picks_email.build_html(self.new, self.diff, previous=self.old)
-        self.assertIn("display:none", html)
+        for fragment in ("HPE Inc.", "Last return", "+18.90%", ">NEW<", "TXG</b>", "Portfolio rebalanced"):
+            # removed stock details come from the previous snapshot; added stock flagged; GT re-rating chip
+            self.assertIn(fragment, html)
+        self.assertIn("display:none", html)  # the preheader carries the summary
         self.assertIn("Portfolio rebalance: +MRNA -HPE", html)
-
-    def test_banner_is_rendered_only_when_given(self):
-        self.assertNotIn("Admin test", picks_email.build_html(self.new, self.diff))
+        self.assertNotIn("Admin test", html)
         self.assertIn("Admin test", picks_email.build_html(self.new, self.diff, banner="Admin test"))
 
     def test_html_escapes_scraped_text(self):
@@ -136,7 +138,7 @@ class BodyTests(unittest.TestCase):
 
 
 class FormatTests(unittest.TestCase):
-    def test_parsers(self):
+    def test_parsers_and_display_helpers(self):
         self.assertEqual(parse_money("$1,915.92"), 1915.92)
         self.assertEqual(parse_money("$81.10B"), 81.10e9)
         self.assertEqual(parse_money("$616.91M"), 616.91e6)
@@ -147,8 +149,6 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(str(parse_date("Oct 29, 2026")), "2026-10-29")
         self.assertEqual(str(parse_date("2026-10-01")), "2026-10-01")
         self.assertIsNone(parse_date("soon"))
-
-    def test_display_helpers(self):
         self.assertEqual(display_date("Updated on Oct 2, 2026"), "Oct 2, 2026")
         self.assertEqual(display_date("Updated October 1"), "October 1")
         self.assertEqual(short_date("Oct 29, 2026"), "Oct 29")
@@ -160,10 +160,6 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_fetched({}), "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WatchlistContextTests(unittest.TestCase):
     def _row(self, **extra):
         base = row("TEAM", current_price="$196.50", signal_price="$187.63", signal_date="2026-10-05",
@@ -172,14 +168,12 @@ class WatchlistContextTests(unittest.TestCase):
         return base
 
     def test_since_signal_waits_for_the_signal_time(self):
-        from datetime import datetime, timezone
-        from quantcheck.picks_format import since_signal
         r = self._row()
         self.assertIsNone(since_signal(r, datetime(2026, 10, 4, 16, 0, tzinfo=timezone.utc)))
         self.assertAlmostEqual(since_signal(r, datetime(2026, 10, 7, 13, 0, tzinfo=timezone.utc)), 196.50 / 187.63 - 1)
         self.assertIsNone(since_signal(self._row(signal_price="")))
 
-    def test_watchlist_rows_show_reason_and_move_after_signal(self):
+    def test_watchlist_rows_show_reason_and_move_after_signal_but_not_before(self):
         data = snapshot([], [self._row()])
         data["fetched_at"] = "2026-10-07T13:00:00"
         html = picks_email.build_html(data, None)
@@ -190,8 +184,7 @@ class WatchlistContextTests(unittest.TestCase):
         self.assertIn("+4.7% since Oct 5", text)
         self.assertIn("Gaining on its sector", text)
 
-    def test_weekend_detection_before_signal_shows_no_move(self):
-        data = snapshot([], [self._row()])
+        # Weekend detection before the signal shows no move.
         data["fetched_at"] = "2026-10-04T16:00:00"
         html = picks_email.build_html(data, None)
         self.assertNotIn("since Oct 5", html)
@@ -201,3 +194,7 @@ class WatchlistContextTests(unittest.TestCase):
         old = snapshot([], [self._row(signal_price="$180.00", watch_reason="", signal_at="", signal_date="")])
         new = snapshot([], [self._row()])
         self.assertFalse(compare(old, new)["changed"])
+
+
+if __name__ == "__main__":
+    unittest.main()

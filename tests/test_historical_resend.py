@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
+from quantcheck.historical_resend import ResendValidationError, execute_resend, main, prepare_resend
+
 
 def picks(fetched_at, weekly_date, symbols):
     return {
@@ -54,9 +56,7 @@ class HistoricalResendTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_selects_snapshot_by_internal_pick_date_and_reconstructs_diff(self):
-        from quantcheck.historical_resend import prepare_resend
-
+    def test_selects_snapshot_by_internal_pick_date_reconstructs_diff_and_binds_same_run_attachments(self):
         plan = prepare_resend(self.root, "Updated on Aug 7, 2026")
 
         self.assertEqual(plan.raw_path.name, "picks_raw_2026-08-09_120101.json")
@@ -67,12 +67,6 @@ class HistoricalResendTests(unittest.TestCase):
         self.assertIn("Delayed alert", plan.body)
         self.assertEqual(plan.subject, "Quant GT · Weekly Watchlist: +FROG -ARM")
         self.assertEqual(plan.summary()["subject"], plan.subject)
-
-    def test_binds_excel_and_both_screenshots_from_same_fetch(self):
-        from quantcheck.historical_resend import prepare_resend
-
-        plan = prepare_resend(self.root, "Updated on Aug 7, 2026")
-
         self.assertEqual(
             [path.name for path in plan.attachments],
             [
@@ -82,54 +76,34 @@ class HistoricalResendTests(unittest.TestCase):
             ],
         )
 
-    def test_fails_closed_when_matching_attachment_is_missing(self):
-        from quantcheck.historical_resend import ResendValidationError, prepare_resend
-
-        (self.root / "screenshots/watchlist_2026-08-09_120101.png").unlink()
-
+    def test_fails_closed_when_matching_attachment_is_missing_or_excel_symbols_differ(self):
+        shot = self.root / "screenshots/watchlist_2026-08-09_120101.png"
+        shot.rename(shot.with_suffix(".hidden"))
         with self.assertRaisesRegex(ResendValidationError, "missing same-run attachment"):
             prepare_resend(self.root, "Updated on Aug 7, 2026")
-
-    def test_fails_closed_when_excel_symbols_do_not_match_raw(self):
-        from quantcheck.historical_resend import ResendValidationError, prepare_resend
+        shot.with_suffix(".hidden").rename(shot)
 
         path = self.root / "output/quantgt_picks_report_2026-08-09_160101.xlsx"
         workbook = load_workbook(path)
-        sheet = workbook["Weekly Watchlist"]
-        for row in sheet.iter_rows():
+        for row in workbook["Weekly Watchlist"].iter_rows():
             for cell in row:
                 if cell.value == "FROG":
                     cell.value = "WRONG"
         workbook.save(path)
-
         with self.assertRaisesRegex(ResendValidationError, "Excel symbols do not match raw snapshot"):
             prepare_resend(self.root, "Updated on Aug 7, 2026")
 
-    def test_send_requires_exact_date_confirmation(self):
-        from quantcheck.historical_resend import ResendValidationError, execute_resend, prepare_resend
-
+    def test_send_requires_exact_date_confirmation_then_uses_validated_body_attachments_and_private_recipients(self):
         plan = prepare_resend(self.root, "Updated on Aug 7, 2026")
         with patch("quantcheck.historical_resend.send_email_per_recipient") as sender:
             with self.assertRaisesRegex(ResendValidationError, "confirmation date"):
                 execute_resend(plan, ["user@example.com"], confirm_date="Updated on Jul 31, 2026")
             sender.assert_not_called()
 
-    def test_send_uses_validated_body_attachments_and_private_recipients(self):
-        from quantcheck.historical_resend import execute_resend, prepare_resend
+        with patch("quantcheck.historical_resend.send_email_per_recipient", return_value=(["user@example.com"], [])) as sender:
+            delivered, failed = execute_resend(plan, ["user@example.com"], confirm_date="Updated on Aug 7, 2026")
 
-        plan = prepare_resend(self.root, "Updated on Aug 7, 2026")
-        with patch(
-            "quantcheck.historical_resend.send_email_per_recipient",
-            return_value=(["user@example.com"], []),
-        ) as sender:
-            delivered, failed = execute_resend(
-                plan,
-                ["user@example.com"],
-                confirm_date="Updated on Aug 7, 2026",
-            )
-
-        self.assertEqual(delivered, ["user@example.com"])
-        self.assertEqual(failed, [])
+        self.assertEqual((delivered, failed), (["user@example.com"], []))
         sender.assert_called_once_with(
             plan.subject,
             plan.body,
@@ -139,61 +113,39 @@ class HistoricalResendTests(unittest.TestCase):
             retries=2,
         )
 
-    def test_cli_recipient_flag_sends_only_to_explicit_address_not_the_subscriber_route(self):
-        # --recipient is the admin-preview mode: --send must reach exactly
-        # the given address(es) and must never call subscriber_recipients
-        # (the real, full subscriber list), even though .env is loaded.
-        from quantcheck.historical_resend import main
-
+    def test_cli_recipient_flag_is_admin_preview_otherwise_the_full_subscriber_route(self):
+        # --recipient: --send must reach exactly the given address and never call subscriber_recipients
+        # (the real subscriber list), even though .env is loaded. Without it: backward-compatible subscriber route.
         (self.root / ".env").write_text("NOTIFY_EMAIL_TO=real-subscriber@example.com\n", encoding="utf-8")
-        argv = [
-            "historical_resend",
-            "--weekly-date", "Updated on Aug 7, 2026",
-            "--root", str(self.root),
-            "--send",
-            "--confirm-date", "Updated on Aug 7, 2026",
-            "--recipient", "admin@example.com",
-        ]
-        buf = io.StringIO()
-        with patch("quantcheck.historical_resend.send_email_per_recipient", return_value=(["admin@example.com"], [])) as sender, \
-             patch("quantcheck.historical_resend.subscriber_recipients") as subscriber_route, \
-             patch("sys.argv", argv), patch.dict("os.environ", {}, clear=True), redirect_stdout(buf):
-            main()
+        base = ["historical_resend", "--weekly-date", "Updated on Aug 7, 2026", "--root", str(self.root),
+                "--send", "--confirm-date", "Updated on Aug 7, 2026"]
+        cases = {
+            "explicit recipient": (["--recipient", "admin@example.com"], ["admin@example.com"], "explicit_recipient"),
+            "subscriber route": ([], ["real-subscriber@example.com"], "subscriber_route"),
+        }
+        for name, (extra, expected_to, source) in cases.items():
+            with self.subTest(name):
+                buf = io.StringIO()
+                with patch("quantcheck.historical_resend.send_email_per_recipient", return_value=(expected_to, [])) as sender, \
+                     patch("sys.argv", base + extra), patch.dict("os.environ", {}, clear=True), redirect_stdout(buf):
+                    if extra:
+                        with patch("quantcheck.historical_resend.subscriber_recipients") as subscriber_route:
+                            main()
+                        subscriber_route.assert_not_called()
+                    else:
+                        main()
 
-        subscriber_route.assert_not_called()
-        sender.assert_called_once()
-        self.assertEqual(sender.call_args.kwargs["to"], ["admin@example.com"])
-        summary = json.loads(buf.getvalue())
-        self.assertEqual(summary["recipients_source"], "explicit_recipient")
-        self.assertEqual(summary["delivered"], 1)
+                sender.assert_called_once()
+                self.assertEqual(sender.call_args.kwargs["to"], expected_to)
+                summary = json.loads(buf.getvalue())
+                self.assertEqual(summary["recipients_source"], source)
+                self.assertEqual(summary["delivered"], len(expected_to))
 
-    def test_cli_without_recipient_flag_still_uses_the_full_subscriber_route(self):
-        # Backward compatibility: omitting --recipient must behave exactly
-        # like before this flag existed.
-        from quantcheck.historical_resend import main
+    def test_unknown_weekly_date_fails_closed(self):
+        with self.assertRaisesRegex(ResendValidationError, "no raw snapshot has weekly.pick_date"):
+            prepare_resend(self.root, "Updated on Jan 1, 2026")
 
-        (self.root / ".env").write_text("NOTIFY_EMAIL_TO=real-subscriber@example.com\n", encoding="utf-8")
-        argv = [
-            "historical_resend",
-            "--weekly-date", "Updated on Aug 7, 2026",
-            "--root", str(self.root),
-            "--send",
-            "--confirm-date", "Updated on Aug 7, 2026",
-        ]
-        buf = io.StringIO()
-        with patch(
-            "quantcheck.historical_resend.send_email_per_recipient",
-            return_value=(["real-subscriber@example.com"], []),
-        ) as sender, patch("sys.argv", argv), patch.dict("os.environ", {}, clear=True), redirect_stdout(buf):
-            main()
-
-        self.assertEqual(sender.call_args.kwargs["to"], ["real-subscriber@example.com"])
-        summary = json.loads(buf.getvalue())
-        self.assertEqual(summary["recipients_source"], "subscriber_route")
-
-    def test_fails_closed_when_update_has_no_diff(self):
-        from quantcheck.historical_resend import ResendValidationError, prepare_resend
-
+    def test_duplicate_snapshots_of_the_same_update_still_reconstruct_the_diff(self):
         duplicate = picks("2026-08-10T13:00:43", "Updated on Aug 7, 2026", ["DELL", "FROG"])
         (self.root / "state/raw/picks_raw_2026-08-10_090043.json").write_text(json.dumps(duplicate))
 

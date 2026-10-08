@@ -12,11 +12,11 @@ sys.modules.setdefault(
     types.SimpleNamespace(sync_playwright=lambda: None, TimeoutError=TimeoutError),
 )
 
-from openpyxl import load_workbook
+from openpyxl import load_workbook  # noqa: E402
 
-from quantcheck import picks_excel
-from quantcheck.diff import compare
-from quantcheck.historical_resend import _validate_excel_symbols
+from quantcheck import picks_excel  # noqa: E402
+from quantcheck.diff import compare  # noqa: E402
+from quantcheck.historical_resend import _validate_excel_symbols  # noqa: E402
 
 OLD = {
     "fetched_at": "2026-09-30T21:51:44",
@@ -42,31 +42,36 @@ NEW = {
 }
 
 
+def header_index(ws, header_row=picks_excel.HEADER_ROW):
+    return {cell.value: cell.column for cell in ws[header_row]}
+
+
 class PicksExcelTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / "report.xlsx"
+    @classmethod
+    def setUpClass(cls):
+        # Writing a workbook is the slow part; do it once per variant.
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.with_diff = Path(cls._tmp.name) / "with_diff.xlsx"
+        cls.without_diff = Path(cls._tmp.name) / "without_diff.xlsx"
+        picks_excel.write_report(cls.with_diff, NEW, compare(OLD, NEW), OLD)
+        picks_excel.write_report(cls.without_diff, NEW)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def _header_index(self, ws, header_row=picks_excel.HEADER_ROW):
-        return {cell.value: cell.column for cell in ws[header_row]}
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
 
     def test_sheets_and_resend_symbol_contract(self):
-        picks_excel.write_report(self.path, NEW, compare(OLD, NEW), OLD)
-        wb = load_workbook(self.path)
-        self.assertEqual(wb.sheetnames, ["Overview", "Changes", "Portfolio", "Weekly Watchlist"])
-        _validate_excel_symbols(self.path, NEW)  # raises on mismatch
+        # historical_resend relies on the Portfolio / Weekly Watchlist sheets and their Symbol column.
+        self.assertEqual(load_workbook(self.with_diff).sheetnames, ["Overview", "Changes", "Portfolio", "Weekly Watchlist"])
+        _validate_excel_symbols(self.with_diff, NEW)  # raises on mismatch
 
-    def test_no_changes_sheet_without_diff(self):
-        picks_excel.write_report(self.path, NEW)
-        self.assertNotIn("Changes", load_workbook(self.path).sheetnames)
+        names = load_workbook(self.without_diff).sheetnames
+        self.assertNotIn("Changes", names)  # no Changes sheet without a diff
+        self.assertEqual(names, ["Overview", "Portfolio", "Weekly Watchlist"])
 
     def test_values_are_typed_with_number_formats(self):
-        picks_excel.write_report(self.path, NEW, compare(OLD, NEW), OLD)
-        ws = load_workbook(self.path)["Portfolio"]
-        cols = self._header_index(ws)
+        ws = load_workbook(self.with_diff)["Portfolio"]
+        cols = header_index(ws)
         r = picks_excel.FIRST_DATA_ROW
         self.assertEqual(ws.cell(r, cols["Price"]).value, 203.21)
         self.assertEqual(ws.cell(r, cols["Price"]).number_format, picks_excel.FMT_MONEY)
@@ -83,26 +88,17 @@ class PicksExcelTests(unittest.TestCase):
         self.assertEqual(ws.cell(r + 1, cols["Status"]).value, "UPDATED")  # gt_score changed
 
     def test_all_empty_columns_are_dropped(self):
-        picks_excel.write_report(self.path, NEW)
-        ws = load_workbook(self.path)["Weekly Watchlist"]
-        headers = set(self._header_index(ws))
+        headers = set(header_index(load_workbook(self.without_diff)["Weekly Watchlist"]))
         self.assertNotIn("Buy Price", headers)
         self.assertIn("Price", headers)
 
     def test_changes_sheet_lists_added_removed_and_field_updates(self):
-        picks_excel.write_report(self.path, NEW, compare(OLD, NEW), OLD)
-        ws = load_workbook(self.path)["Changes"]
+        ws = load_workbook(self.with_diff)["Changes"]
         rows = [tuple(c.value for c in r) for r in ws.iter_rows(min_row=picks_excel.FIRST_DATA_ROW)]
         self.assertIn(("Portfolio", "Added", "MRNA", "Moderna, Inc.", None, None, None), rows)
         self.assertIn(("Portfolio", "Removed", "HPE", "Hewlett Packard Enterprise", None, None, None), rows)
         self.assertIn(("Portfolio", "Updated", "DELL", "Dell Technologies Inc.", "GT Score", "4.34/5", "3.99/5"), rows)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class WatchlistExcelTests(unittest.TestCase):
     def test_watchlist_sheet_has_signal_and_reason_columns(self):
         data = {
             "fetched_at": "2026-10-07T13:00:00",
@@ -115,9 +111,13 @@ class WatchlistExcelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = picks_excel.write_report(Path(tmp) / "r.xlsx", data)
             ws = load_workbook(path)["Weekly Watchlist"]
-            cols = {cell.value: cell.column for cell in ws[picks_excel.HEADER_ROW]}
+            cols = header_index(ws)
             r = picks_excel.FIRST_DATA_ROW
             self.assertEqual(ws.cell(r, cols["Signal Price"]).value, 187.63)
             self.assertEqual(ws.cell(r, cols["Signal Date"]).value, datetime(2026, 10, 5))
             self.assertAlmostEqual(ws.cell(r, cols["Since Signal"]).value, 196.50 / 187.63 - 1)
             self.assertEqual(ws.cell(r, cols["Why Selected"]).value, "Gaining on its sector")
+
+
+if __name__ == "__main__":
+    unittest.main()

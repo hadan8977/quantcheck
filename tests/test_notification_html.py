@@ -1,14 +1,14 @@
 import _test_env  # noqa: F401  -- must stay first: isolates QUANTCHECK_HOME from the real install
-import unittest
 import sys
 import types
+import unittest
 
 sys.modules.setdefault("playwright", types.ModuleType("playwright"))
 sys.modules.setdefault(
     "playwright.sync_api",
     types.SimpleNamespace(sync_playwright=lambda: None, TimeoutError=TimeoutError),
 )
-from quantcheck.picks_check import build_notification_html
+from quantcheck.picks_check import build_notification_html  # noqa: E402
 
 
 class NotificationHtmlTests(unittest.TestCase):
@@ -101,7 +101,7 @@ class NotificationHtmlTests(unittest.TestCase):
         self.assertNotIn('overflow-x:auto', html)
         self.assertNotIn('min-width:98px', html)
 
-    def test_portfolio_email_uses_current_page_name(self):
+    def test_current_layout_names_and_watchlist_metrics(self):
         data = {
             "fetched_at": "2026-07-13T01:00:00",
             "source": "https://quantgt.io",
@@ -114,22 +114,12 @@ class NotificationHtmlTests(unittest.TestCase):
         self.assertIn("Portfolio", html)
         self.assertNotIn(">Monthly Picks<", html)
 
-    def test_watchlist_email_keeps_legacy_weekly_metrics(self):
-        data = {
-            "fetched_at": "2026-07-13T01:00:00",
-            "source": "https://quantgt.io",
-            "monthly": {"pick_date": "Updated on July 1, 2026", "rows": []},
-            "weekly": {
-                "kind": "watchlist",
-                "pick_date": "Updated on Jul 10, 2026",
-                "rows": [{
-                    "symbol": "SNDK", "company": "Sandisk Corporation",
-                    "sector": "Electronic Technology", "gt_score": "4.96/5",
-                    "current_price": "$1,915.92", "buy_or_entry_price": "$618.82",
-                    "analyst_signal": "Buy +0.24",
-                }],
-            },
-        }
+        data["weekly"]["rows"] = [{
+            "symbol": "SNDK", "company": "Sandisk Corporation",
+            "sector": "Electronic Technology", "gt_score": "4.96/5",
+            "current_price": "$1,915.92", "buy_or_entry_price": "$618.82",
+            "analyst_signal": "Buy +0.24",
+        }]
 
         html = build_notification_html(data, None)
 

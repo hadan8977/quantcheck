@@ -31,12 +31,15 @@ systemd/
   quantcheck.service     production service unit
 tests/
   _test_env.py           imported first by every test: points QUANTCHECK_HOME at a temp dir
+  _fast_calendar.py      swaps in a fast, calendar-equivalent trading-day lookup for the suite
   test_*.py              dependency-light unit tests for core logic
 ```
 
 ## Local Checks
 
 Every test module starts with `import _test_env`, which points `QUANTCHECK_HOME` at a throwaway directory before any `quantcheck` import. On the server the repo root is the production install, so without it the suite wrote fake events into production logs and could read the production `.env`. Keep that import first in any new test file.
+
+Test layout: business rules are tested once, at the service layer (`test_service_members.py`, `test_service_ops.py`); `test_admin_cli.py` and `test_mcp_server.py` only test wiring (args to service params, JSON/error envelope, dry-run and confirm flags). Prefer table-driven `subTest` cases over near-identical methods. Tests must not sleep, use the network or launch a browser, and a clean run prints only the unittest summary: capture stdout/stderr in tests that cause output.
 
 Run checks that do not need real Quant GT credentials:
 
