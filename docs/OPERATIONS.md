@@ -247,7 +247,6 @@ quantcheck-admin ops run picks --force --confirm   # force can send real mail; c
 - `screenshots/`: captured screenshots
 - `logs/`: scheduler, monitor, health, and email logs
 - `logs/notify_routes.log`: membership filter decisions (subscribers/active/excluded counts on every real send)
-- `browser-profile/`: legacy persistent login profile, no longer used by any job (every job logs in fresh with `QUANTGT_EMAIL`)
 
 ## Troubleshooting
 
