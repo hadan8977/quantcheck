@@ -1,7 +1,9 @@
 import _test_env  # noqa: F401  -- must stay first: isolates QUANTCHECK_HOME from the real install
-import json
+import contextlib
+import io
 import tempfile
 import unittest
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -45,23 +47,18 @@ class DailyAdminStatusTestCase(unittest.TestCase):
 
 
 class MembershipCardsTests(DailyAdminStatusTestCase):
-    def test_no_store_yet_reports_zero_counts_not_an_error(self):
-        cards = das.membership_cards(self.base_env())
-        by_label = {c["label"]: c for c in cards}
+    def cards(self, **env):
+        return {c["label"]: c for c in das.membership_cards(self.base_env(**env))}
+
+    def test_no_store_reports_zero_counts_and_enforcement_flag(self):
+        by_label = self.cards()  # no store yet: zero counts, not an error
         self.assertEqual(by_label["Members Active"]["value"], 0)
         self.assertEqual(by_label["Members Expired"]["value"], 0)
+        self.assertEqual((by_label["Membership Enforcement"]["value"], by_label["Membership Enforcement"]["tone"]), ("on", "neutral"))
 
-    def test_enforcement_on_by_default(self):
-        cards = das.membership_cards(self.base_env())
-        by_label = {c["label"]: c for c in cards}
-        self.assertEqual(by_label["Membership Enforcement"]["value"], "on")
-        self.assertEqual(by_label["Membership Enforcement"]["tone"], "neutral")
-
-    def test_enforcement_off_is_flagged_as_error_tone(self):
-        cards = das.membership_cards(self.base_env(MEMBERSHIP_ENFORCEMENT="0"))
-        by_label = {c["label"]: c for c in cards}
-        self.assertIn("OFF", by_label["Membership Enforcement"]["value"])
-        self.assertEqual(by_label["Membership Enforcement"]["tone"], "error")
+        off = self.cards(MEMBERSHIP_ENFORCEMENT="0")["Membership Enforcement"]
+        self.assertIn("OFF", off["value"])
+        self.assertEqual(off["tone"], "error")
 
     def test_counts_and_thresholds(self):
         now = datetime.now(UTC)
@@ -75,8 +72,7 @@ class MembershipCardsTests(DailyAdminStatusTestCase):
             ]
         )
 
-        cards = das.membership_cards(self.base_env())
-        by_label = {c["label"]: c for c in cards}
+        by_label = self.cards()
 
         self.assertEqual(by_label["Members Active"]["value"], 3)  # active, soon, mid
         self.assertEqual(by_label["Members Expiring <=7d"]["value"], 1)
@@ -92,22 +88,24 @@ class MembershipCardsTests(DailyAdminStatusTestCase):
         now = datetime.now(UTC)
         self.write_store([Member(email="active@example.com", status="active", joined_at=now, expires_at=now + timedelta(days=100))])
 
-        cards = das.membership_cards(self.base_env())
-        by_label = {c["label"]: c for c in cards}
+        by_label = self.cards()
 
         self.assertEqual(by_label["Members Expiring <=14d"]["tone"], "neutral")
         self.assertEqual(by_label["Expiring Within 14d"]["value"], "none")
 
     def test_corrupt_store_reports_error_card_instead_of_crashing(self):
         (self.root / "state" / "memberships.json").write_text("{not valid json", encoding="utf-8")
-        cards = das.membership_cards(self.base_env())
-        by_label = {c["label"]: c for c in cards}
+        by_label = self.cards()
         self.assertEqual(by_label["Membership"]["tone"], "error")
         self.assertIn("memberships.json", by_label["Membership"]["value"])
 
 
-class BuildStatusIncludesMembershipTests(DailyAdminStatusTestCase):
-    def test_build_status_body_includes_membership_section(self):
+class StatusReportTests(DailyAdminStatusTestCase):
+    def test_build_status_includes_membership_section_and_is_well_formed_without_data(self):
+        subject, body, html = das.build_status(self.base_env())
+        self.assertTrue(subject.startswith("Quant GT Daily Admin Status"))
+        self.assertIn("Members Active: 0", body)
+
         now = datetime.now(UTC)
         self.write_store([Member(email="soon@example.com", status="active", joined_at=now, expires_at=now + timedelta(days=2))])
 
@@ -117,23 +115,22 @@ class BuildStatusIncludesMembershipTests(DailyAdminStatusTestCase):
         self.assertIn("Membership Enforcement: on", body)
         self.assertIn("soon@example.com", html)
 
-    def test_build_status_is_still_well_formed_with_no_membership_data(self):
-        subject, body, html = das.build_status(self.base_env())
-        self.assertTrue(subject.startswith("Quant GT Daily Admin Status"))
-        self.assertIn("Members Active: 0", body)
-
-
-class SendDailyStatusNeverTouchesRealInfrastructureTests(DailyAdminStatusTestCase):
     def test_send_uses_patched_log_file_and_mocked_delivery(self):
         now = datetime.now(UTC)
         self.write_store([Member(email="soon@example.com", status="active", joined_at=now, expires_at=now + timedelta(days=2))])
+        printed = io.StringIO()
 
         with patch("quantcheck.daily_admin_status.load_env", return_value=self.base_env()), \
-             patch("quantcheck.daily_admin_status.deliver_email", return_value=True) as deliver:
+             patch("quantcheck.daily_admin_status.deliver_email", return_value=True) as deliver, \
+             contextlib.redirect_stdout(printed), warnings.catch_warnings():
+            # daily_admin_status.log() leaves its log handle to the GC: that ResourceWarning is production behavior.
+            warnings.simplefilter("ignore", ResourceWarning)
             ok = das.send_daily_status()
 
         self.assertTrue(ok)
         deliver.assert_called_once()
+        self.assertTrue(deliver.call_args.args[0].startswith("Quant GT Daily Admin Status"))
+        self.assertIn("Members Expiring <=7d: 1", printed.getvalue())  # the daemon captures this report from stdout
         log_contents = (self.root / "logs" / "daily_admin_status.log").read_text(encoding="utf-8")
         self.assertIn("sent", log_contents)
 

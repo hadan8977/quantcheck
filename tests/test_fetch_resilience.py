@@ -1,7 +1,13 @@
 import _test_env  # noqa: F401  -- must stay first: isolates QUANTCHECK_HOME from the real install
+import copy
+import io
+import json
 import sys
+import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 sys.modules.setdefault("playwright", types.ModuleType("playwright"))
@@ -10,8 +16,8 @@ sys.modules.setdefault(
     types.SimpleNamespace(sync_playwright=lambda: None, TimeoutError=TimeoutError),
 )
 
-from quantcheck import picks_check
-from quantcheck.notify_routes import EmailRoute
+from quantcheck import picks_check  # noqa: E402
+from quantcheck.notify_routes import EmailRoute  # noqa: E402
 
 
 def weekly_row(symbol="W1"):
@@ -73,28 +79,56 @@ class FetchResilienceTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertTrue(data["auth_verified"])
 
-    def test_manual_test_email_failure_notifies_admin_route(self):
+    def test_failures_notify_admin_route_with_card_html(self):
+        # run_test_email and run_check share one contract: a failed fetch emails the admin route only.
+        # capture_logged_in_screenshots is patched: unpatched it tries to launch a real browser (~17 s).
         sent = []
 
         def fake_notify(subject, body, media=None, html_body=None, telegram_body=None, route=EmailRoute.PICKS_UPDATE):
             sent.append({"subject": subject, "body": body, "html_body": html_body, "route": route, "media": media or []})
 
-        with patch.object(picks_check, "fetch_current", side_effect=RuntimeError("monthly rows stayed empty after retries")), \
-             patch.object(picks_check, "notify", side_effect=fake_notify), \
+        def run_test_email():
+            picks_check.run_test_email()
+
+        def run_check():
+            with patch.object(picks_check, "trading_day", return_value=True), \
+                 patch.object(picks_check, "current_window", return_value="premarket_0830"):
+                picks_check.run_check(force=False, no_random=True)
+
+        cases = (("manual test email", run_test_email, "Quant GT Monitor Test Failed"), ("scheduled check", run_check, "Quant GT Monitor Failed"))
+        for name, run, subject in cases:
+            with self.subTest(name):
+                sent.clear()
+                with patch.object(picks_check, "fetch_current", side_effect=RuntimeError("monthly rows stayed empty after retries")), \
+                     patch.object(picks_check, "capture_logged_in_screenshots", return_value={}), \
+                     patch.object(picks_check, "notify", side_effect=fake_notify), \
+                     patch.object(picks_check, "log"), \
+                     patch.object(picks_check, "write_health"), \
+                     patch.object(picks_check, "json_load", return_value={}):
+                    with self.assertRaises(RuntimeError):
+                        run()
+
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0]["route"], EmailRoute.ADMIN)
+                self.assertIn(subject, sent[0]["subject"])
+                self.assertIn("monthly rows stayed empty", sent[0]["body"])
+                self.assertIsNotNone(sent[0]["html_body"])
+                self.assertIn("Quant GT Monitor", sent[0]["html_body"])
+                self.assertIn("Error", sent[0]["html_body"])
+                self.assertIn("monthly rows stayed empty", sent[0]["html_body"])
+
+    def test_failure_alert_still_goes_out_when_the_failure_screenshot_also_fails(self):
+        sent = []
+        with patch.object(picks_check, "fetch_current", side_effect=RuntimeError("fetch broke")), \
+             patch.object(picks_check, "capture_logged_in_screenshots", side_effect=RuntimeError("no browser")), \
+             patch.object(picks_check, "notify", side_effect=lambda subject, body, media=None, **kw: sent.append((subject, media, kw["route"]))), \
              patch.object(picks_check, "log"), \
              patch.object(picks_check, "write_health"), \
              patch.object(picks_check, "json_load", return_value={}):
             with self.assertRaises(RuntimeError):
                 picks_check.run_test_email()
 
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["route"], EmailRoute.ADMIN)
-        self.assertIn("Quant GT Monitor Test Failed", sent[0]["subject"])
-        self.assertIn("monthly rows stayed empty", sent[0]["body"])
-        self.assertIsNotNone(sent[0]["html_body"])
-        self.assertIn("Quant GT Monitor", sent[0]["html_body"])
-        self.assertIn("Error", sent[0]["html_body"])
-        self.assertIn("monthly rows stayed empty", sent[0]["html_body"])
+        self.assertEqual([(subject, media, route) for subject, media, route in sent], [("Quant GT Monitor Test Failed", [], EmailRoute.ADMIN)])
 
     def test_manual_test_email_success_resets_health_without_promoting_baseline(self):
         with patch.object(picks_check, "fetch_current", return_value=VALID_DATA), \
@@ -102,9 +136,11 @@ class FetchResilienceTests(unittest.TestCase):
              patch.object(picks_check.report, "export_excel", return_value=picks_check.OUTPUT / "test.xlsx"), \
              patch.object(picks_check, "capture_logged_in_screenshots", return_value={}), \
              patch.object(picks_check, "notify"), \
-             patch.object(picks_check, "write_health") as write_health:
+             patch.object(picks_check, "write_health") as write_health, \
+             redirect_stdout(io.StringIO()) as printed:
             picks_check.run_test_email()
 
+        self.assertEqual(json.loads(printed.getvalue())["status"], "test_notification_sent")
         write_health.assert_called_once()
         health = write_health.call_args.kwargs
         self.assertEqual(health["consecutive_failures"], 0)
@@ -113,36 +149,7 @@ class FetchResilienceTests(unittest.TestCase):
         self.assertEqual(health["monthly_date"], VALID_DATA["monthly"]["pick_date"])
         self.assertEqual(health["weekly_date"], VALID_DATA["weekly"]["pick_date"])
 
-    def test_run_check_failure_notifies_admin_with_card_html(self):
-        sent = []
-
-        def fake_notify(subject, body, media=None, html_body=None, telegram_body=None, route=EmailRoute.PICKS_UPDATE):
-            sent.append({"subject": subject, "body": body, "html_body": html_body, "route": route, "media": media or []})
-
-        with patch.object(picks_check, "trading_day", return_value=True), \
-             patch.object(picks_check, "current_window", return_value="premarket_0830"), \
-             patch.object(picks_check, "fetch_current", side_effect=RuntimeError("monthly rows stayed empty after retries")), \
-             patch.object(picks_check, "capture_logged_in_screenshots", return_value={}), \
-             patch.object(picks_check, "notify", side_effect=fake_notify), \
-             patch.object(picks_check, "log"), \
-             patch.object(picks_check, "write_health"), \
-             patch.object(picks_check, "json_load", return_value={}):
-            with self.assertRaises(RuntimeError):
-                picks_check.run_check(force=False, no_random=True)
-
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["route"], EmailRoute.ADMIN)
-        self.assertIn("Quant GT Monitor Failed", sent[0]["subject"])
-        self.assertIsNotNone(sent[0]["html_body"])
-        self.assertIn("Quant GT Monitor", sent[0]["html_body"])
-        self.assertIn("monthly rows stayed empty", sent[0]["html_body"])
-
     def test_run_check_change_sends_informative_subject_with_diff_aware_excel(self):
-        import copy
-        import json
-        import tempfile
-        from pathlib import Path
-
         old = copy.deepcopy(VALID_DATA)
         new = copy.deepcopy(VALID_DATA)
         new["weekly"]["rows"][0] = weekly_row("NEW1")
@@ -219,6 +226,13 @@ class FetchResilienceTests(unittest.TestCase):
             def wait_for_timeout(self, ms):
                 self.wait_calls.append({"timeout_ms": ms})
 
+        class PartialPage:
+            def wait_for_function(self, *args, **kwargs):
+                raise AssertionError("should not wait for screenshot when parsed rows are partial")
+
+            def wait_for_timeout(self, ms):
+                raise AssertionError("should not sleep when parsed rows are partial")
+
         page = FakePage()
         rows = [{"symbol": f"W{i}", "gt_score": "4.0/5"} for i in range(10)]
 
@@ -233,20 +247,11 @@ class FetchResilienceTests(unittest.TestCase):
         self.assertIn("height > window.innerHeight + 400", page.wait_calls[0]["script"])
         self.assertEqual(page.wait_calls[1], {"timeout_ms": 1000})
 
-    def test_weekly_screenshot_ready_rejects_partial_weekly_rows(self):
-        class FakePage:
-            def wait_for_function(self, *args, **kwargs):
-                raise AssertionError("should not wait for screenshot when parsed rows are partial")
-
-            def wait_for_timeout(self, ms):
-                raise AssertionError("should not sleep when parsed rows are partial")
-
-        rows = [{"symbol": f"W{i}", "gt_score": "4.0/5"} for i in range(5)]
-
+        partial = [{"symbol": f"W{i}", "gt_score": "4.0/5"} for i in range(5)]
         with patch.object(picks_check.report, "wait_for_picks_content"), \
-             patch.object(picks_check.report, "wait_for_parsable_picks_rows", return_value=rows):
+             patch.object(picks_check.report, "wait_for_parsable_picks_rows", return_value=partial):
             with self.assertRaisesRegex(RuntimeError, "expected 10 parsed rows"):
-                picks_check._wait_for_screenshot_ready(FakePage(), "weekly")
+                picks_check._wait_for_screenshot_ready(PartialPage(), "weekly")
 
 
 if __name__ == "__main__":
