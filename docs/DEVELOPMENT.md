@@ -30,10 +30,13 @@ scripts/
 systemd/
   quantcheck.service     production service unit
 tests/
+  _test_env.py           imported first by every test: points QUANTCHECK_HOME at a temp dir
   test_*.py              dependency-light unit tests for core logic
 ```
 
 ## Local Checks
+
+Every test module starts with `import _test_env`, which points `QUANTCHECK_HOME` at a throwaway directory before any `quantcheck` import. On the server the repo root is the production install, so without it the suite wrote fake events into production logs and could read the production `.env`. Keep that import first in any new test file.
 
 Run checks that do not need real Quant GT credentials:
 

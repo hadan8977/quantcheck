@@ -27,8 +27,6 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 STATE_DIR = ROOT
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-PROFILE = ROOT / "browser-profile"
-PROFILE.mkdir(parents=True, exist_ok=True)
 
 EMAIL = os.environ.get("QUANTGT_EMAIL", "")
 PASSWORD = os.environ.get("QUANTGT_PASSWORD", "")

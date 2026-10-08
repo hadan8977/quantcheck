@@ -106,7 +106,7 @@ sudo systemctl enable --now quantcheck.service
 - `output/`: Excel reports.
 - `screenshots/`: captured screenshots.
 - `logs/`: scheduler, monitor, health, email, and `notify_routes.log` (membership filter decisions).
-- `browser-profile/`: Playwright persistent login profile.
+- `browser-profile/`: legacy persistent login profile, no longer used (jobs log in fresh).
 
 These paths are ignored by git.
 

@@ -6,10 +6,44 @@ from datetime import datetime, timezone
 
 from playwright.sync_api import sync_playwright
 
-from quantcheck.picks_check import ROOT, STATE, SHOTS, PROFILE, BASE, NY, load_env, ensure_login
+from quantcheck.picks_check import ROOT, STATE, SHOTS, BASE, NY, load_env, ensure_login
 from quantcheck.state import atomic_write_json
 
 LATEST = STATE / 'site_snapshot_latest.json'
+# Snapshots are taken as the paid .env account in a fresh browser context.
+# Before 2026-10-08 they used the persistent browser-profile, which was logged
+# into a different, unsubscribed account and so captured placeholder pages;
+# site_diff_notify treats a capture_mode change as a new baseline.
+CAPTURE_MODE = 'fresh_login_member'
+
+PAGES = [
+    ('dashboard', f'{BASE}/quantgt-picks'),
+    ('monthly', f'{BASE}/quantgt-picks'),
+    ('weekly', f'{BASE}/weekly-picks'),
+    ('tradingview_indicator', f'{BASE}/tradingview-indicator'),
+    ('ai_winners', f'{BASE}/who-is-winning-ai'),
+    ('rrg', f'{BASE}/rrg'),
+    ('market_tools', f'{BASE}/market-tools'),
+    ('study_guide', f'{BASE}/learn'),
+    ('live_update', f'{BASE}/notifications'),
+    ('track_record', f'{BASE}/performance'),
+    ('weekly_digest', f'{BASE}/weekly-digest'),
+    ('research', f'{BASE}/research'),
+]
+
+
+def member_access(page) -> bool:
+    """True only when Quant GT reports an active subscription for this session."""
+    try:
+        body = page.evaluate(
+            """async () => {
+              const r = await fetch('/api/user/subscription', { credentials: 'same-origin' });
+              return r.ok ? await r.json() : null;
+            }"""
+        )
+    except Exception:
+        return False
+    return bool(((body or {}).get('subscription') or {}).get('hasAccess'))
 PREVIOUS = STATE / 'site_snapshot_previous.json'
 
 
@@ -51,19 +85,17 @@ def main():
         PREVIOUS.write_text(LATEST.read_text(encoding='utf-8'), encoding='utf-8')
     ts = datetime.now(NY).strftime('%Y-%m-%d_%H%M%S')
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(str(PROFILE), headless=True, viewport={'width': 1440, 'height': 1100})
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(viewport={'width': 1440, 'height': 1100}, locale='en-US', storage_state=None)
         page = ctx.new_page()
         ensure_login(page, env)
-        pages = [
-            ('dashboard', f'{BASE}/quantgt-picks'),
-            ('monthly', f'{BASE}/quantgt-picks'),
-            ('weekly', f'{BASE}/weekly-picks'),
-            ('tradingview_indicator', f'{BASE}/tradingview-indicator'),
-            ('ai_winners', f'{BASE}/who-is-winning-ai'),
-            ('rrg', f'{BASE}/rrg'),
-            ('market_tools', f'{BASE}/market-tools'),
-            ('study_guide', f'{BASE}/learn'),
-        ]
+        if not member_access(page):
+            # Never record placeholder pages as "the site": keep the last good
+            # snapshot and fail loudly (rc != 0 in the scheduler log).
+            ctx.close()
+            browser.close()
+            raise SystemExit('site snapshot aborted: logged-in session has no active Quant GT subscription')
+        pages = PAGES
         collected = []
         screenshots = {}
         # If a page times out, keep the previous good page in latest snapshot and
@@ -91,8 +123,10 @@ def main():
                 fallback['url'] = url
                 collected.append(fallback)
         ctx.close()
+        browser.close()
     snapshot = {
         'captured_at': datetime.now(timezone.utc).isoformat(),
+        'capture_mode': CAPTURE_MODE,
         'pages': collected,
         'screenshots': screenshots,
     }

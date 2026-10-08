@@ -188,6 +188,8 @@ Override only for emergencies with:
 QUANTCHECK_SCHEDULE=08:20:official_mail,08:30:picks,08:45:health_site,09:00:picks,09:20:official_mail,09:50:weekly_digest,12:00:official_mail,12:40:daily_admin_status,17:00:picks,17:15:health_site,17:30:official_mail
 ```
 
+The `health_site` job snapshots the member pages (Portfolio, Watchlist, Live Update, Track Record, Weekly Digest, Research, and the tool pages) and emails admins a "Website Update Detected" note when headings, navigation, buttons or links change. Data that moves on its own (watchlist stock cards, monthly-return cells, the digest headline/archive, research articles, market news) is filtered out in `site_diff_notify.py`, so an alert means the site's structure changed and selectors may need attention.
+
 Allowed job kinds are `picks`, `health_site`, `health`, `official_mail`, `daily_admin_status`, and `weekly_digest`.
 
 ## Membership
@@ -236,7 +238,7 @@ quantcheck-admin ops run picks --force --confirm   # force can send real mail; c
 - `state/latest_picks.json`: latest valid source state
 - `state/previous_picks.json`: previous valid source state
 - `state/raw/`: raw pick captures for audit
-- `state/site_snapshot_latest.json`: latest site snapshot
+- `state/site_snapshot_latest.json`: latest site snapshot (member pages, captured by a fresh login as `QUANTGT_EMAIL`; refuses to run without an active subscription)
 - `state/official_mail_forwarder_state.json`: official email forwarding dedupe state
 - `state/health.json`: monitor health state
 - `state/memberships.json`: membership records (subscriber PII, never committed; see [Membership](MEMBERSHIP.md))
@@ -245,14 +247,14 @@ quantcheck-admin ops run picks --force --confirm   # force can send real mail; c
 - `screenshots/`: captured screenshots
 - `logs/`: scheduler, monitor, health, and email logs
 - `logs/notify_routes.log`: membership filter decisions (subscribers/active/excluded counts on every real send)
-- `browser-profile/`: Playwright persistent login profile
+- `browser-profile/`: legacy persistent login profile, no longer used by any job (every job logs in fresh with `QUANTGT_EMAIL`)
 
 ## Troubleshooting
 
 Login fails or picks table is empty:
 
 - Confirm `QUANTGT_EMAIL` and `QUANTGT_PASSWORD`.
-- Remove `browser-profile/` to force a fresh login.
+- Every job already logs in fresh with these credentials; there is no saved session to clear.
 - Run `python -m quantcheck.picks_check --mode screenshot --force` and inspect screenshots.
 
 No email arrives:

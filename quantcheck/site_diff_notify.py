@@ -59,8 +59,37 @@ NEWS_HOST_MARKERS = (
 NEWS_AGE_RE = re.compile(r'\b\d+\s*(?:m|h|d|min|mins|hour|hours|day|days)\s+ago\b', re.I)
 
 
+# Member pages render live data as buttons/headings/links. These move with the
+# data (weekly stock cards, monthly-return cells, the digest headline and
+# archive, research articles), not with the site's structure.
+STOCK_CARD_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,5} \S')          # "TXG 10x Genomics, Inc. Health Technology"
+PERCENT_CELL_RE = re.compile(r'^[+\-\u2212]?\d+(?:\.\d+)?%$')     # "+17.4%"
+DIGEST_ARCHIVE_RE = re.compile(r'^[A-Z]{3} \d{1,2} ')              # "SEP 25 Bond yields hit 5% ..."
+TRAILING_COUNT_RE = re.compile(r'\s+\d+$')                         # "ALL 12" -> "ALL"
+
+
+def _is_external_link(item: str) -> bool:
+    return 'http' in item and 'quantgt.io' not in item
+
+
+def is_dynamic_member_item(page_name: str, key: str, item: str) -> bool:
+    if page_name == 'weekly' and key == 'buttons':
+        return bool(STOCK_CARD_RE.match(item))
+    if page_name == 'track_record' and key == 'buttons':
+        return bool(PERCENT_CELL_RE.match(item))
+    if page_name == 'weekly_digest':
+        # The section table of contents (internal #digest-* links) carries the
+        # structure; headings repeat it plus the weekly headline.
+        return key == 'headings' or (key == 'buttons' and bool(DIGEST_ARCHIVE_RE.match(item))) or (key == 'links' and _is_external_link(item))
+    if page_name == 'research':
+        return (key == 'headings' and item != 'Quant Research') or (key == 'links' and '/research/' in item)
+    return False
+
+
 def is_noise_item(page_name: str, key: str, item) -> bool:
     """Return True for dynamic content that should not trigger user alerts."""
+    if is_dynamic_member_item(page_name, key, str(item or '')):
+        return True
     if page_name == 'market_tools':
         # Market Tools is mostly external/news/calendar content and has proven
         # noisy. Treat its content diffs as non-actionable; separate health
@@ -78,7 +107,11 @@ def is_noise_item(page_name: str, key: str, item) -> bool:
 
 
 def filtered_set(page_name: str, key: str, values):
-    return {x for x in values if not is_noise_item(page_name, key, x)}
+    kept = {x for x in values if not is_noise_item(page_name, key, x)}
+    if page_name == 'research' and key == 'buttons':
+        # Category tabs carry article counts ("ALL 12"); a new article is not a site change.
+        kept = {TRAILING_COUNT_RE.sub('', x) for x in kept}
+    return kept
 
 
 def load(path: Path):
@@ -112,6 +145,10 @@ def diff(old, new):
     # If latest snapshot had page capture failures, suppress site-change alerts.
     # A timeout means "unknown", not "page/nav removed".
     if failed_pages(new):
+        return []
+    # A capture-method change (e.g. the 2026-10 switch from placeholder pages
+    # to real member pages) is a new baseline, not a website update.
+    if old.get('capture_mode') != new.get('capture_mode'):
         return []
     oldn, newn = normalize(old), normalize(new)
     lines = []

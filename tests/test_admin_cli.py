@@ -1,3 +1,4 @@
+import _test_env  # noqa: F401  -- must stay first: isolates QUANTCHECK_HOME from the real install
 import io
 import json
 import tempfile

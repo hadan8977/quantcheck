@@ -43,7 +43,6 @@ STATE = ROOT / 'state'
 OUTPUT = ROOT / 'output'
 SHOTS = ROOT / 'screenshots'
 LOGS = ROOT / 'logs'
-PROFILE = ROOT / 'browser-profile'
 LATEST = STATE / 'latest_picks.json'
 PREVIOUS = STATE / 'previous_picks.json'
 HEALTH = STATE / 'health.json'
@@ -58,7 +57,7 @@ WINDOWS = {
     'postmarket_1700': (17, 0),
 }
 
-for d in [STATE, OUTPUT, SHOTS, LOGS, PROFILE]:
+for d in [STATE, OUTPUT, SHOTS, LOGS]:
     d.mkdir(parents=True, exist_ok=True)
 
 

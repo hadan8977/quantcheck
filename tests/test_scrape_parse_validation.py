@@ -1,3 +1,4 @@
+import _test_env  # noqa: F401  -- must stay first: isolates QUANTCHECK_HOME from the real install
 import unittest
 
 from quantcheck.scrape_parse import rows_from_matrix
